@@ -1,0 +1,55 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "Spatial-Spectral Sensing System"
+authors:
+  - family-names: "Kristiansen"
+    given-names: "Tobias"
+    orcid: "https://orcid.org/0009-0009-2790-7159"
+    email: "tobias.kristiansen@nmbu.no"
+    affiliation: "Norwegian University of Life Sciences, Faculty of science and technology, Norway"
+  - family-names: "Thiis"
+    given-names: "Thomas"
+    orcid: "https://orcid.org/0000-0002-0552-356X"
+    affiliation: "Norwegian University of Life Sciences, Faculty of science and technology, Norway"
+  - family-names: "Burud"
+    given-names: "Ingunn"
+    orcid: "https://orcid.org/0000-0003-0637-4073"
+    affiliation: "Norwegian University of Life Sciences, Faculty of science and technology, Norway"
+  - family-names: "Petersen"
+    given-names: "Arnkell Jonas"
+    orcid: "https://orcid.org/0009-0004-4305-0179"
+    affiliation: "Norwegian University of Life Sciences, Faculty of science and technology, Norway"
+repository-code: "https://github.com/NMBU-BuildingPhysics/SpatialSpectralMonitoring"
+license: GPL-3.0
+keywords:
+  - "Human-Centric Lighting"
+  - "Indoor Environmental Quality (IEQ)"
+  - "Spectral Power Distribution (SPD)"
+  - "High Dynamic Range Imaging (HDRI)"
+  - "Building Monitoring"
+  - "Open-Source Hardware"
+preferred-citation:
+  type: article
+  title: "Enabling scalable, human-centric daylight assessment: A validated open-source sensing system for spatial-spectral monitoring in buildings"
+  authors:
+    - family-names: "Kristiansen"
+      given-names: "Tobias"
+      orcid: "https://orcid.org/0009-0009-2790-7159"
+    - family-names: "Thiis"
+      given-names: "Thomas"
+      orcid: "https://orcid.org/0000-0002-0552-356X"
+    - family-names: "Burud"
+      given-names: "Ingunn"
+      orcid: "https://orcid.org/0000-0003-0637-4073"
+    - family-names: "Petersen"
+      given-names: "Arnkell Jonas"
+      orcid: "https://orcid.org/0009-0004-4305-0179"
+  journal: "Building and Environment"
+  year: 2026
+  volume: xx
+  pages: xxx-xxx
+  # volume and start-page will be updated once the article is assigned
+  publisher: "Elsevier"
+  doi: "10.1016/j.buildenv.2026.114364"
+  url: "https://doi.org/10.1016/j.buildenv.2026.114364"

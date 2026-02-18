@@ -1,0 +1,11 @@
+.github
+secrets.h
+calibration.cpp
+02_Firmware/Main/src/sensors/*
+!02_Firmware/Main/src/sensors/readme.md
+*.jpeg
+*.hdr
+*.csv
+*.json
+*.txt
+!03_Python_Suite/requirements.txt

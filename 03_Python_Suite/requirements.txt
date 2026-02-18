@@ -1,0 +1,10 @@
+# Python Analysis & Calibration Suite - Dependencies
+# Python 3.11.9 or higher recommended
+
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+opencv-python>=4.8.0
+pyserial>=3.5
