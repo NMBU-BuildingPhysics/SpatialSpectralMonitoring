@@ -2,6 +2,7 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
 title: "Spatial-Spectral Sensing System"
+date-released: "2026-02-26"
 authors:
   - family-names: "Kristiansen"
     given-names: "Tobias"
@@ -47,9 +48,9 @@ preferred-citation:
       orcid: "https://orcid.org/0009-0004-4305-0179"
   journal: "Building and Environment"
   year: 2026
-  volume: xx
-  pages: xxx-xxx
-  # volume and start-page will be updated once the article is assigned
-  publisher: "Elsevier"
+  volume: 294
+  start: 114364
+  publisher:
+    name: "Elsevier"
   doi: "10.1016/j.buildenv.2026.114364"
   url: "https://doi.org/10.1016/j.buildenv.2026.114364"
