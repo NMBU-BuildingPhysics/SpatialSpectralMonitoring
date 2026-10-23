@@ -391,86 +391,165 @@ def create_validation_report(calibration_report: Dict[str, Any], output_path: st
     print(f"Validation report saved to: {output_path}")
 
 
-def main():
-    """Main execution function for validation."""
-    sensor_id = sys.argv[1] if len(sys.argv) > 1 else "sensor11"
-    
-    workspace = Path(__file__).parent
-    calibration_report_path = workspace / "01_apply_calibration_output" / f"{sensor_id}_calibration_report.json"
-    calibrated_hdr_path = workspace / "01_apply_calibration_output" / f"{sensor_id}_calibrated.hdr"
-    calibration_points_path = workspace / "01_apply_calibration_input" / f"{sensor_id}_calibration_points.json"
-    
+def resolve_calibrated_hdr(sensor_id: str, workspace: Path) -> Path | None:
+    """
+    Resolve the calibrated HDR file path, checking new (_Cal.hdr) and legacy names.
+    """
+    candidates = [
+        workspace / "01_apply_calibration_output" / f"{sensor_id}_Cal.hdr",
+        workspace / "01_apply_calibration_output" / f"{sensor_id}_calibrated.hdr",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def resolve_calibration_points(sensor_id: str, workspace: Path) -> Path | None:
+    """
+    Resolve calibration points JSON, checking local input and characterization output.
+    """
+    char_dir = workspace.parents[1] / "01_Characterization" / "04_Camera_Characterization"
+    candidates = [
+        workspace / "01_apply_calibration_input" / f"{sensor_id}_calibration_points.json",
+        char_dir / "04_map_calibration_points_output" / f"{sensor_id}_calibration_points.json",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def validate_sensor(sensor_id: str, workspace: Path) -> bool:
+    """
+    Run validation for a single sensor. Returns True on success.
+    """
+    cal_report_path = workspace / "01_apply_calibration_output" / f"{sensor_id}_calibration_report.json"
+    calibrated_hdr_path = resolve_calibrated_hdr(sensor_id, workspace)
+    cal_points_path = resolve_calibration_points(sensor_id, workspace)
+
     output_dir = workspace / "02_validate_output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     falsecolor_path = output_dir / f"{sensor_id}_falsecolor.png"
     statistics_path = output_dir / f"{sensor_id}_calibration_stats.png"
     validation_report_path = output_dir / f"{sensor_id}_validation_report.md"
-    
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    print("=" * 70)
-    print("VALIDATION, VISUALIZATION, AND REPORTING")
-    print("=" * 70)
-    
+
+    print(f"\n{'=' * 70}")
+    print(f"VALIDATION — {sensor_id}")
+    print(f"{'=' * 70}")
+
     print("\n[1/5] Loading calibration report...")
-    if not calibration_report_path.exists():
-        print(f"ERROR: Calibration report not found at {calibration_report_path}")
-        print("Please run Phase 5 first.")
-        sys.exit(1)
-    
-    with open(calibration_report_path) as f:
+    if not cal_report_path.exists():
+        print(f"  ERROR: Calibration report not found: {cal_report_path}")
+        print("  Run 01_apply_calibration.py first.")
+        return False
+
+    with open(cal_report_path) as f:
         calibration_report = json.load(f)
-    
     print(f"  [OK] Loaded report for {calibration_report['sensor_id']}")
-    
+
     print("\n[2/5] Validating calibration accuracy...")
     validation = validate_calibration_accuracy(calibration_report)
     quality, quality_desc = assess_calibration_quality(calibration_report)
-    
     print(f"  Mean error: {validation['mean_error_percent']:.2f}%")
-    print(f"  Max error: {validation['max_error_percent']:.2f}%")
-    print(f"  Min error: {validation['min_error_percent']:.2f}%")
     print(f"  Points within 5%: {validation['points_within_5_percent']}/{validation['total_points']}")
-    print(f"  Points within 10%: {validation['points_within_10_percent']}/{validation['total_points']}")
-    print(f"  Overall quality: {quality} - {quality_desc}")
-    
+    print(f"  Quality: {quality} — {quality_desc}")
+
     print("\n[3/5] Generating falsecolor luminance map...")
-    if not calibrated_hdr_path.exists():
-        print(f"ERROR: Calibrated HDR not found at {calibrated_hdr_path}")
-        sys.exit(1)
-    
-    calibrated_hdr = cv2.imread(str(calibrated_hdr_path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
-    if calibrated_hdr is None:
-        print(f"ERROR: Failed to load calibrated HDR")
-        sys.exit(1)
-    
-    with open(calibration_points_path) as f:
-        calibration_points_data = json.load(f)
-    
-    generate_falsecolor_matplotlib(
-        calibrated_hdr,
-        str(falsecolor_path),
-        log_scale=True,
-        calibration_points=calibration_points_data['points']
-    )
-    
+    if calibrated_hdr_path is None:
+        print(f"  WARNING: Calibrated HDR not found for {sensor_id} — skipping falsecolor")
+    else:
+        calibrated_hdr = cv2.imread(str(calibrated_hdr_path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
+        if calibrated_hdr is None:
+            print(f"  WARNING: Failed to load HDR — skipping falsecolor")
+        else:
+            cal_pts_overlay = []
+            if cal_points_path and cal_points_path.exists():
+                with open(cal_points_path) as f:
+                    cal_pts_overlay = json.load(f).get('points', [])
+            generate_falsecolor_matplotlib(calibrated_hdr, str(falsecolor_path),
+                                           log_scale=True, calibration_points=cal_pts_overlay)
+
     print("\n[4/5] Generating calibration statistics plot...")
     generate_statistics_plot(calibration_report, str(statistics_path))
-    
+
     print("\n[5/5] Creating validation report...")
     create_validation_report(calibration_report, str(validation_report_path))
-    
-    print("\n" + "=" * 70)
-    print("VALIDATION COMPLETE!")
+
+    print(f"\n  Outputs saved to: {output_dir}")
+    return True
+
+
+def find_all_sensor_reports(workspace: Path) -> list:
+    """Return sorted list of sensor IDs that have calibration reports."""
+    import re
+    report_dir = workspace / "01_apply_calibration_output"
+    sensor_ids = set()
+    if report_dir.exists():
+        for f in report_dir.glob("*_calibration_report.json"):
+            m = re.search(r'(sensor\d+)', f.name)
+            if m:
+                sensor_ids.add(m.group(1))
+    return sorted(sensor_ids)
+
+
+def main():
+    """Main execution function for validation. Supports batch ('all') mode."""
+    workspace = Path(__file__).parent
+    explicit_arg = sys.argv[1] if len(sys.argv) > 1 else None
+
+    all_sensors = find_all_sensor_reports(workspace)
+
+    if explicit_arg == "all":
+        sensors_to_process = all_sensors
+        batch_mode = True
+    elif explicit_arg is not None:
+        sensors_to_process = [explicit_arg]
+        batch_mode = False
+    elif len(all_sensors) > 1:
+        sensors_to_process = all_sensors
+        batch_mode = True
+        print(f"Auto-detected {len(all_sensors)} calibration reports — running batch mode.")
+    elif len(all_sensors) == 1:
+        sensors_to_process = all_sensors
+        batch_mode = False
+    else:
+        sensors_to_process = ["sensor11"]
+        batch_mode = False
+
     print("=" * 70)
-    print("\nOutputs:")
-    print(f"  • Falsecolor map: {falsecolor_path.name}")
-    print(f"  • Statistics plot: {statistics_path.name}")
-    print(f"  • Validation report: {validation_report_path.name}")
-    print(f"\nValidation Results:")
-    print(f"  • Calibration quality: {quality}")
-    print(f"  • Mean error: {validation['mean_error_percent']:.2f}%")
-    print(f"  • Accurate points (+/-10%): {validation['points_within_10_percent']}/{validation['total_points']}")
+    print("VALIDATION, VISUALIZATION, AND REPORTING")
+    if batch_mode:
+        print(f"Batch mode: {len(sensors_to_process)} sensors")
     print("=" * 70)
+    print()
+
+    processed, failed = [], []
+    for i, sensor_id in enumerate(sensors_to_process, 1):
+        if batch_mode:
+            print(f"\n[{i}/{len(sensors_to_process)}] {sensor_id}")
+        try:
+            ok = validate_sensor(sensor_id, workspace)
+            (processed if ok else failed).append(sensor_id)
+        except Exception as e:
+            print(f"[ERROR] {sensor_id}: {e}")
+            import traceback; traceback.print_exc()
+            failed.append(sensor_id)
+
+    if batch_mode:
+        print()
+        print("=" * 70)
+        print(f"BATCH VALIDATION COMPLETE: {len(processed)}/{len(sensors_to_process)} succeeded")
+        if failed:
+            print(f"  Failed: {', '.join(failed)}")
+        print("=" * 70)
+        print()
+        print("Next step: python 03_export_firmware_cal.py all")
+    else:
+        if processed:
+            print(f"\nValidation complete for {processed[0]}")
+        print("\nNext step: python 03_export_firmware_cal.py")
 
 
 if __name__ == "__main__":

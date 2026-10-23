@@ -16,7 +16,8 @@ import matplotlib.pyplot as plt
 import math
 from pathlib import Path
 
-OUTPUT_DIR = Path.cwd() / "2_a_Grid_Plots"
+SCRIPT_DIR = Path(__file__).parent
+OUTPUT_DIR = SCRIPT_DIR / "2_a_Grid_Plots"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 PLOT_ORDER_KEYS = [
@@ -36,7 +37,7 @@ CHANNEL_LABEL_MAP = {
     "raw_ch12": "860 nm", "raw_ch17": "900 nm", "raw_ch18": "940 nm"
 }
 
-INPUT_DATA_FILE = "0_Measurements/temperature_sweep_data.csv"
+INPUT_DATA_FILE = SCRIPT_DIR / "0_Measurements/temperature_sweep_data.csv"
 REFERENCE_TEMPERATURE = 25.0
 POLYNOMIAL_DEGREE = 2
 MINIMUM_TEMPERATURE_TO_INCLUDE = 25.0
@@ -84,9 +85,10 @@ def fit_and_plot(ax, x_data_full, y_data_full, x_data_fit, y_data_fit, plot_titl
 
 print(f"Loading data from: {INPUT_DATA_FILE}")
 try:
-    df_full = pd.read_csv(INPUT_DATA_FILE)
+    df_full = pd.read_csv(str(INPUT_DATA_FILE))
 except FileNotFoundError:
-    print(f"ERROR: Cannot find file '{INPUT_DATA_FILE}'."); sys.exit()
+    print(f"ERROR: Cannot find file '{INPUT_DATA_FILE}'.")
+    sys.exit()
 
 df_fit = df_full[df_full['temperature'] >= MINIMUM_TEMPERATURE_TO_INCLUDE].copy()
 if df_fit.empty:

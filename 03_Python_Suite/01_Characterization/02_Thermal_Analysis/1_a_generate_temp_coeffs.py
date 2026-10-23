@@ -16,7 +16,8 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
-INPUT_DATA_FILE = "0_Measurements/temperature_sweep_data.csv"
+SCRIPT_DIR = Path(__file__).parent
+INPUT_DATA_FILE = SCRIPT_DIR / "0_Measurements/temperature_sweep_data.csv"
 REFERENCE_TEMPERATURE = 25.0
 POLYNOMIAL_DEGREE = 2
 MINIMUM_TEMPERATURE_TO_INCLUDE = 25.0
@@ -25,8 +26,7 @@ ENABLE_SUBSAMPLING = True
 SUBSAMPLE_BIN_WIDTH_C = 0.5
 SUBSAMPLE_MAX_PER_BIN = 25
 
-CWD = Path.cwd()
-OUTPUT_DIR = CWD / "1_a_Generate_temp_Coeffs"
+OUTPUT_DIR = SCRIPT_DIR / "1_a_Generate_temp_Coeffs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 CORRECTION_FACTORS_DIR = OUTPUT_DIR
 
@@ -68,7 +68,7 @@ def fit_and_plot(ax, x_data_full, y_data_full, x_data_fit, y_data_fit, channel_n
 
 print(f"Loading data from: {INPUT_DATA_FILE}")
 try:
-    df = pd.read_csv(INPUT_DATA_FILE)
+    df = pd.read_csv(str(INPUT_DATA_FILE))
 except FileNotFoundError:
     print(f"ERROR: Cannot find file '{INPUT_DATA_FILE}'.")
     sys.exit()

@@ -20,6 +20,34 @@ from typing import Dict, Optional
 
 g_scale_factor = 1.0
 
+
+def load_image_for_display(image_path: str) -> np.ndarray:
+    """
+    Load an image for display in the ROI GUI.
+
+    For HDR files: reads float32 data and applies Reinhard tonemapping to
+    produce a uint8 image suitable for OpenCV display.
+    For JPEG/PNG: reads directly as uint8.
+
+    Args:
+        image_path: Path to the image file.
+
+    Returns:
+        BGR uint8 image, or None if loading failed.
+    """
+    path = str(image_path)
+    if path.lower().endswith('.hdr'):
+        hdr = cv2.imread(path, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
+        if hdr is None:
+            return None
+        tonemap = cv2.createTonemapReinhard(gamma=2.2)
+        ldr = tonemap.process(hdr.astype(np.float32))
+        ldr = np.clip(ldr * 255.0, 0, 255).astype(np.uint8)
+        return ldr
+    else:
+        return cv2.imread(path)
+
+
 class ROIManager:
     """Manages ROI parameters for multiple sensors with JSON persistence."""
     
@@ -238,12 +266,12 @@ def main():
         print(f"\nERROR: The '{input_folder}' directory was not found.")
         return
     
-    image_files = [f for f in os.listdir(input_folder) 
-                   if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-    
+    image_files = [f for f in os.listdir(input_folder)
+                   if f.lower().endswith(('.jpg', '.jpeg', '.png', '.hdr'))]
+
     if not image_files:
         print(f"\nERROR: No images found in '{input_folder}'.")
-        print("Please place your bracketed JPEG images in this folder and run again.")
+        print("Please place JPEG, PNG, or HDR images in this folder and run again.")
         return
     
     print(f"Found {len(image_files)} images.")
@@ -256,14 +284,17 @@ def main():
             continue
         
         image_path = input_folder / filename
-        image = cv2.imread(str(image_path))
+        image = load_image_for_display(image_path)
         if image is None:
             print(f"Skipping {filename}: could not read image.")
             continue
-        
+
         print(f"\nNow defining ROI for: {filename} (Sensor: {sensor_id})")
-        
-        height, width, _ = image.shape
+
+        if image.ndim == 3:
+            height, width = image.shape[:2]
+        else:
+            height, width = image.shape
         window_name = f"Define ROI: {filename} (n=Next, q=Quit)"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         

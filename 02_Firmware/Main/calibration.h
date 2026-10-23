@@ -9,12 +9,12 @@
 * This file contains calibration profiles for different sensor units
 */
 
-#ifndef CALIBRATION_H
-#define CALIBRATION_H
+#pragma once
 
 #include <string>
 #include <array>
 #include <vector>
+#include <cstdint>
 
 constexpr int NUM_CHANNELS = 21;
 
@@ -28,11 +28,24 @@ struct TempCoeffSet {
     float a, b, c;
 };
 
-struct AutoIntModel {
-    float coeff_a;
-    float coeff_b;
-};
+struct CameraCalibration {
+    float vign_b;
+    float vign_c;
+    float vign_d;
+    float vign_cx;
+    float vign_cy;
+    float vign_max_dist;
 
+    float cal_scale;
+
+    uint16_t crop_x;
+    uint16_t crop_y;
+    uint16_t crop_w;
+    uint16_t crop_h;
+
+    uint16_t src_width;
+    uint16_t src_height;
+};
 
 struct ChannelInfo {
     const char* name;
@@ -45,6 +58,4 @@ extern const std::vector<ChannelInfo> masterChannelList;
 CalibrationProfile getCalibrationProfile(const std::string& deviceName);
 const TempCoeffSet& getTempCoefficients(const std::string& channelName);
 const TempCoeffSet& getLuxTempCoefficients();
-const AutoIntModel& getAutoIntegrationModel();
-
-#endif
+const CameraCalibration& getCameraCalibration(const std::string& deviceName);

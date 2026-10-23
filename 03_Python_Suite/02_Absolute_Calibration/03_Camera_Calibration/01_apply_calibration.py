@@ -12,8 +12,9 @@
 import numpy as np
 import cv2
 import json
+import re
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import sys
 
 
@@ -204,227 +205,235 @@ def save_calibration_report(report: Dict[str, Any], output_path: str) -> None:
     print(f"Calibration report saved to: {output_path}")
 
 
-def main():
-    """Main execution function for calibration."""
-    script_dir = Path(__file__).parent
+def resolve_sensor_files(sensor_id: str, script_dir: Path) -> Dict[str, Any]:
+    """
+    Resolve input file paths for a given sensor.
+
+    Calibration points search order:
+      1. script_dir/01_apply_calibration_input/{sensor_id}_calibration_points.json
+      2. char_dir/04_map_calibration_points_output/{sensor_id}_calibration_points.json
+
+    HDR search order (first found wins):
+      1. input_dir/{sensor_id}_Vin.hdr                   (vignetting-corrected, new suffix)
+      2. input_dir/{sensor_id}_vignetting_corrected.hdr  (backward compat)
+      3. char_dir/05_correct_vignetting_output/{sensor_id}_Vin.hdr
+      4. char_dir/05_correct_vignetting_output/{sensor_id}_vignetting_corrected.hdr
+      5. input_dir/{sensor_id}_Raw.hdr                   (raw fallback, new suffix)
+      6. input_dir/{sensor_id}_raw.hdr                   (backward compat)
+
+    Args:
+        sensor_id: Sensor identifier (e.g. 'sensor11')
+        script_dir: Directory containing this script
+
+    Returns:
+        Dict with keys:
+          calibration_points_path: Path or None
+          hdr_path: Path or None
+          using_vignetting_correction: bool
+    """
     input_dir = script_dir / "01_apply_calibration_input"
-    
-    input_dir.mkdir(parents=True, exist_ok=True)
-    sensor_id = None
-    
-    if len(sys.argv) > 1:
-        sensor_id = sys.argv[1]
-    else:
-        import re
-        detected_sensors = set()
-        
-        for hdr_file in input_dir.glob("*.hdr"):
-            match = re.search(r'(sensor\d+)', hdr_file.name)
-            if match:
-                detected_sensors.add(match.group(1))
-        
-        for json_file in input_dir.glob("*_calibration_points.json"):
-            match = re.search(r'(sensor\d+)', json_file.name)
-            if match:
-                detected_sensors.add(match.group(1))
-        
-        for csv_file in input_dir.glob("*.csv"):
-            match = re.search(r'(sensor\d+)', csv_file.name)
-            if match:
-                detected_sensors.add(match.group(1))
-        
-        if len(detected_sensors) == 1:
-            sensor_id = list(detected_sensors)[0]
-            print(f"Auto-detected sensor: {sensor_id}")
-            print()
-        elif len(detected_sensors) > 1:
-            print("=" * 60)
-            print("MULTIPLE SENSORS DETECTED")
-            print("=" * 60)
-            print()
-            print(f"Found files for {len(detected_sensors)} sensors: {', '.join(sorted(detected_sensors))}")
-            print()
-            print("Please specify which sensor to calibrate:")
-            print(f"  python 01_apply_calibration.py <sensor_id>")
-            print()
-            print("Example:")
-            print(f"  python 01_apply_calibration.py {sorted(detected_sensors)[0]}")
-            print("=" * 60)
-            sys.exit(1)
-        else:
-            sensor_id = "sensor11"
-            print(f"No sensor files detected. Using default: {sensor_id}")
-            print()
-    
-    calibration_points_path = input_dir / f"{sensor_id}_calibration_points.json"
-    
-    calibration_points_path = input_dir / f"{sensor_id}_calibration_points.json"
-    
-    vignetting_corrected_path = input_dir / f"{sensor_id}_vignetting_corrected.hdr"
-    raw_hdr_path = input_dir / f"{sensor_id}_raw.hdr"
-    
-    if vignetting_corrected_path.exists():
-        uncalibrated_hdr_path = vignetting_corrected_path
-        using_vignetting_correction = True
-    else:
-        uncalibrated_hdr_path = raw_hdr_path
-        using_vignetting_correction = False
-    
+    char_dir = script_dir.parents[1] / "01_Characterization" / "04_Camera_Characterization"
+
+    # --- calibration points ---
+    cal_candidates = [
+        input_dir / f"{sensor_id}_calibration_points.json",
+        char_dir / "04_map_calibration_points_output" / f"{sensor_id}_calibration_points.json",
+    ]
+    cal_path: Optional[Path] = next((p for p in cal_candidates if p.exists()), None)
+
+    # --- HDR file ---
+    hdr_ordered = [
+        (input_dir / f"{sensor_id}_Vin.hdr", True),
+        (input_dir / f"{sensor_id}_vignetting_corrected.hdr", True),
+        (char_dir / "05_correct_vignetting_output" / f"{sensor_id}_Vin.hdr", True),
+        (char_dir / "05_correct_vignetting_output" / f"{sensor_id}_vignetting_corrected.hdr", True),
+        (input_dir / f"{sensor_id}_Raw.hdr", False),
+        (input_dir / f"{sensor_id}_raw.hdr", False),
+        (char_dir / "03_generate_hdr_output" / f"{sensor_id}_Raw.hdr", False),
+        (char_dir / "03_generate_hdr_output" / f"{sensor_id}_raw.hdr", False),
+    ]
+    # Last resort: any device-generated HDR in 01_define_roi_input/
+    roi_input_dir = char_dir / "01_define_roi_input"
+    if roi_input_dir.exists():
+        for p in sorted(roi_input_dir.glob(f"*{sensor_id}*.hdr")):
+            hdr_ordered.append((p, False))
+    hdr_path: Optional[Path] = None
+    using_vignetting = False
+    for p, is_vig in hdr_ordered:
+        if p.exists():
+            hdr_path = p
+            using_vignetting = is_vig
+            break
+
+    return {
+        "calibration_points_path": cal_path,
+        "hdr_path": hdr_path,
+        "using_vignetting_correction": using_vignetting,
+    }
+
+
+def find_all_calibratable_sensors(script_dir: Path) -> List[str]:
+    """
+    Discover all sensor IDs that have calibration point JSON files.
+
+    Scans:
+      - script_dir/01_apply_calibration_input/ for *_calibration_points.json
+      - char_dir/04_map_calibration_points_output/ for *_calibration_points.json
+      - char_dir/05_correct_vignetting_output/ for *_Vin.hdr and *_vignetting_corrected.hdr
+
+    Args:
+        script_dir: Directory containing this script
+
+    Returns:
+        Sorted list of unique sensor IDs.
+    """
+    char_dir = script_dir.parents[1] / "01_Characterization" / "04_Camera_Characterization"
+    sensor_ids: set = set()
+
+    for folder in [
+        script_dir / "01_apply_calibration_input",
+        char_dir / "04_map_calibration_points_output",
+    ]:
+        if folder.exists():
+            for f in folder.glob("*_calibration_points.json"):
+                m = re.search(r'(sensor\d{2})', f.name)
+                if m:
+                    sensor_ids.add(m.group(1))
+
+    vig_dir = char_dir / "05_correct_vignetting_output"
+    if vig_dir.exists():
+        for pattern in ("*_Vin.hdr", "*_vignetting_corrected.hdr"):
+            for f in vig_dir.glob(pattern):
+                m = re.search(r'(sensor\d{2})', f.name)
+                if m:
+                    sensor_ids.add(m.group(1))
+
+    # Also discover sensors from device-generated HDRs in 01_define_roi_input/
+    roi_input_dir = char_dir / "01_define_roi_input"
+    if roi_input_dir.exists():
+        for f in roi_input_dir.glob("*.hdr"):
+            m = re.search(r'(sensor\d{2})', f.name)
+            if m:
+                sensor_ids.add(m.group(1))
+
+    return sorted(sensor_ids)
+
+
+def process_single_calibration(sensor_id: str, script_dir: Path) -> bool:
+    """
+    Run calibration for a single sensor.
+
+    Output: {sensor_id}_Cal.hdr and {sensor_id}_calibration_report.json in
+    01_apply_calibration_output/.
+
+    Returns:
+        True if successful, False otherwise.
+    """
+    input_dir = script_dir / "01_apply_calibration_input"
     output_dir = script_dir / "01_apply_calibration_output"
-    calibrated_hdr_path = output_dir / f"{sensor_id}_calibrated.hdr"
-    report_path = output_dir / f"{sensor_id}_calibration_report.json"
-    
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    csv_files = list(input_dir.glob("*.csv"))
-    has_calibration_points = calibration_points_path.exists()
-    has_hdr = vignetting_corrected_path.exists() or raw_hdr_path.exists()
-    
-    if csv_files and not has_calibration_points and has_hdr:
-        print("=" * 60)
-        print("SETUP REQUIRED: CALIBRATION POINTS NOT FOUND")
-        print("=" * 60)
-        print()
-        print(f"Found in input directory:")
-        print(f"  ✓ CSV file(s): {', '.join([f.name for f in csv_files])}")
-        print(f"  ✓ HDR file: {vignetting_corrected_path.name if vignetting_corrected_path.exists() else raw_hdr_path.name}")
-        print(f"  ✗ Calibration points JSON")
-        print()
-        print("NEXT STEP: Generate calibration points using the helper script")
-        print()
-        print("  Run this command:")
-        print(f"    .\\Run_CalibrationMapping.ps1 -SensorId {sensor_id}")
-        print()
-        print("  This will:")
-        print("  1. Load your HDR and CSV files")
-        print("  2. Launch an interactive tool to mark calibration points")
-        print("  3. Save the calibration points JSON to the input folder")
-        print()
-        print("  After generating calibration points, run this script again.")
-        print("=" * 60)
-        sys.exit(0)
-    
-    if not has_calibration_points or not has_hdr:
-        print("=" * 60)
-        print("MISSING REQUIRED FILES")
-        print("=" * 60)
-        print()
-        print("Required files in input directory:")
-        print()
-        print(f"  1. Calibration Points JSON: {calibration_points_path.name}")
-        print(f"     Status: {'✓ Found' if has_calibration_points else '✗ Missing'}")
-        print()
-        print(f"  2. HDR Image (one of):")
-        print(f"     - {vignetting_corrected_path.name} (recommended)")
-        print(f"       Status: {'✓ Found' if vignetting_corrected_path.exists() else '✗ Missing'}")
-        print(f"     - {raw_hdr_path.name} (fallback)")
-        print(f"       Status: {'✓ Found' if raw_hdr_path.exists() else '✗ Missing'}")
-        print()
-        print("OPTIONS:")
-        print()
-        print("  Option A: Generate new calibration points")
-        print("    1. Place a CSV file with luminance values in the input folder")
-        print("    2. Place an HDR file in the input folder")
-        print(f"    3. Run: .\\Run_CalibrationMapping.ps1 -SensorId {sensor_id}")
-        print()
-        print("  Option B: Copy existing files from characterization workflow")
-        print("    From: 03_Python_Suite/01_Characterization/04_Camera_Characterization/")
-        print(f"    To: {input_dir.name}/")
-        print()
-        print("See README.md for detailed instructions.")
-        print("=" * 60)
-        sys.exit(1)
-    
+
     print("=" * 60)
-    print("PHASE 5: CALIBRATION SCALE FACTOR CALCULATION")
+    print(f"PHASE 5: CALIBRATION \u2014 {sensor_id}")
     print("=" * 60)
     print()
+
+    files = resolve_sensor_files(sensor_id, script_dir)
+    calibration_points_path = files["calibration_points_path"]
+    uncalibrated_hdr_path = files["hdr_path"]
+    using_vignetting_correction = files["using_vignetting_correction"]
+
     if using_vignetting_correction:
         print("[INFO] Using vignetting-corrected HDR")
     else:
         print("[INFO] Using raw HDR (no vignetting correction found)")
     print()
-    
+
+    calibrated_hdr_path = output_dir / f"{sensor_id}_Cal.hdr"
+    report_path = output_dir / f"{sensor_id}_calibration_report.json"
+
+    csv_files = list(input_dir.glob("*.csv"))
+    has_calibration_points = calibration_points_path is not None
+    has_hdr = uncalibrated_hdr_path is not None
+
+    if csv_files and not has_calibration_points and has_hdr:
+        print("=" * 60)
+        print("SETUP REQUIRED: CALIBRATION POINTS NOT FOUND")
+        print("=" * 60)
+        print(f"  \u2713 CSV: {', '.join([f.name for f in csv_files])}")
+        print(f"  \u2713 HDR: {uncalibrated_hdr_path.name}")
+        print(f"  \u2717 Calibration points JSON")
+        print()
+        print(f"Run: .\\0x_Run_CalibrationMapping.ps1 -SensorId {sensor_id}")
+        return False
+
+    if not has_calibration_points or not has_hdr:
+        print("=" * 60)
+        print("MISSING REQUIRED FILES")
+        print("=" * 60)
+        print(f"  Calibration points: {'Found' if has_calibration_points else 'MISSING'}")
+        print(f"  HDR image:          {'Found' if has_hdr else 'MISSING'}")
+        print()
+        print("See README.md for instructions.")
+        return False
+
     print("\n[1/6] Loading calibration points...")
-    if not calibration_points_path.exists():
-        print(f"ERROR: Calibration points not found at {calibration_points_path}")
-        print(f"\nPlease copy the calibration points file to the input directory:")
-        print(f"  From: 03_Python_Suite/01_Characterization/04_Camera_Characterization/04_map_calibration_points_output/")
-        print(f"  To: {input_dir.name}/")
-        sys.exit(1)
-    
     with open(calibration_points_path) as f:
         calibration_data = json.load(f)
-    
     points = calibration_data['points']
-    sensor_id = calibration_data['sensor_id']
-    print(f"  Loaded {len(points)} calibration points for {sensor_id}")
-    
+    detected_sensor_id = calibration_data.get('sensor_id', sensor_id)
+    print(f"  Loaded {len(points)} calibration points for {detected_sensor_id}")
+
     print("\n[2/6] Loading uncalibrated HDR image...")
-    if not uncalibrated_hdr_path.exists():
-        print(f"ERROR: HDR file not found at {uncalibrated_hdr_path}")
-        print(f"\nPlease copy an HDR file to the input directory:")
-        print(f"  Option 1 (recommended): {sensor_id}_vignetting_corrected.hdr")
-        print(f"    From: 03_Python_Suite/01_Characterization/04_Camera_Characterization/05_correct_vignetting_output/")
-        print(f"  Option 2 (fallback): {sensor_id}_raw.hdr")
-        print(f"    From: 03_Python_Suite/01_Characterization/04_Camera_Characterization/03_generate_hdr_output/")
-        print(f"  To: {input_dir.name}/")
-        sys.exit(1)
-    
     hdr = cv2.imread(str(uncalibrated_hdr_path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
     if hdr is None:
         print(f"ERROR: Failed to load HDR file: {uncalibrated_hdr_path}")
-        sys.exit(1)
-    
+        return False
     print(f"  HDR shape: {hdr.shape}, dtype: {hdr.dtype}")
-    
+
     print("\n[3/6] Extracting HDR values at calibration points...")
     hdr_values = extract_hdr_values(hdr, points, region_size=5)
-    
     for i, (point, hdr_val) in enumerate(zip(points, hdr_values)):
         print(f"  Point {i}: ({point['x']}, {point['y']}) -> HDR={hdr_val:.4f}")
-    
+
     print("\n[4/6] Calculating scale factors...")
     measured_luminances = [point['luminance'] for point in points]
     scale_factors = calculate_scale_factors(measured_luminances, hdr_values)
-    
     for i, sf in enumerate(scale_factors):
-        print(f"  Point {i}: scale_factor = {measured_luminances[i]:.1f} / {hdr_values[i]:.4f} = {sf:.2f}")
-    
+        print(f"  Point {i}: scale_factor = {measured_luminances[i]:.1f} / "
+              f"{hdr_values[i]:.4f} = {sf:.2f}")
+
     print("\n[5/6] Computing median scale factor...")
     stats = compute_median_scale(scale_factors)
-    
     print(f"  Median scale: {stats['median']:.2f}")
     print(f"  Mean scale: {stats['mean']:.2f}")
     print(f"  Std dev: {stats['std_dev']:.2f}")
     print(f"  Range: [{stats['min']:.2f}, {stats['max']:.2f}]")
-    
     if stats['outliers']:
-        print(f"  Outliers detected: {len(stats['outliers'])}")
+        print(f"  Outliers: {len(stats['outliers'])}")
         for outlier in stats['outliers']:
-            print(f"    Point {outlier['index']}: {outlier['scale_factor']:.2f} ({outlier['deviation_sigma']:.1f} sigma)")
+            print(f"    Point {outlier['index']}: {outlier['scale_factor']:.2f} "
+                  f"({outlier['deviation_sigma']:.1f}\u03c3)")
     else:
         print("  No outliers detected")
-    
+
     print("\n[6/6] Applying calibration to HDR image...")
     median_scale = stats['median']
     calibrated_hdr = apply_calibration(hdr, median_scale)
     calibrated_hdr_values = extract_hdr_values(calibrated_hdr, points, region_size=5)
     validation = calculate_validation_errors(measured_luminances, hdr_values, calibrated_hdr_values)
-    
     print(f"  Mean error: {validation['mean_error_percent']:.2f}%")
     print(f"  Max error: {validation['max_error_percent']:.2f}%")
-    print(f"  Points within 5%: {validation['points_within_5_percent']}/{len(points)}")
+    print(f"  Points within 5%:  {validation['points_within_5_percent']}/{len(points)}")
     print(f"  Points within 10%: {validation['points_within_10_percent']}/{len(points)}")
-    
+
     print(f"\nSaving calibrated HDR to: {calibrated_hdr_path}")
     cv2.imwrite(str(calibrated_hdr_path), calibrated_hdr)
-    
-    print(f"Generating calibration report...")
-    
+
     calibration_points_report = []
     for i, point in enumerate(points):
-        error_pct = abs(calibrated_hdr_values[i] - measured_luminances[i]) / measured_luminances[i] * 100.0
+        error_pct = (abs(calibrated_hdr_values[i] - measured_luminances[i])
+                     / measured_luminances[i] * 100.0)
         calibration_points_report.append({
             "id": point['id'],
             "x": point['x'],
@@ -436,27 +445,95 @@ def main():
             "calibrated_hdr_value": calibrated_hdr_values[i],
             "error_percent": error_pct
         })
-    
+
     report = {
-        "sensor_id": sensor_id,
+        "sensor_id": detected_sensor_id,
         "uncalibrated_hdr": str(uncalibrated_hdr_path),
         "calibrated_hdr": str(calibrated_hdr_path),
+        "median_scale_factor": median_scale,
         "calibration_points": calibration_points_report,
         "statistics": stats,
         "validation": validation
     }
-    
     save_calibration_report(report, str(report_path))
-    
+
+    quality = ('EXCELLENT' if validation['mean_error_percent'] < 10
+               else 'GOOD' if validation['mean_error_percent'] < 20 else 'FAIR')
     print("\n" + "=" * 60)
     print("PHASE 5 COMPLETE")
     print("=" * 60)
-    print(f"  Calibrated HDR: {calibrated_hdr_path.name}")
+    print(f"  Calibrated HDR:      {calibrated_hdr_path.name}")
     print(f"  Median scale factor: {median_scale:.2f}")
-    print(f"  Mean calibration error: {validation['mean_error_percent']:.2f}%")
-    print(f"  Calibration quality: {'[OK] EXCELLENT' if validation['mean_error_percent'] < 10 else '[OK] GOOD' if validation['mean_error_percent'] < 20 else '[WARNING] FAIR'}")
+    print(f"  Mean error:          {validation['mean_error_percent']:.2f}%")
+    print(f"  Quality:             {quality}")
     print("=" * 60)
+    return True
+
+
+def main():
+    """Main execution function for calibration. Supports batch ('all') mode."""
+    script_dir = Path(__file__).parent
+    input_dir = script_dir / "01_apply_calibration_input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+
+    arg = sys.argv[1] if len(sys.argv) > 1 else None
+
+    # ---- Determine sensors to process ----
+    if arg and arg.lower() == 'all':
+        sensors_to_process = find_all_calibratable_sensors(script_dir)
+        batch_mode = True
+        if not sensors_to_process:
+            print("[ERROR] No calibratable sensors found.")
+            print("  Ensure vignetting HDRs and calibration point JSONs exist in:")
+            print(f"    {input_dir}")
+            print("  or in the characterization output folders.")
+            sys.exit(1)
+        print("=" * 60)
+        print(f"CALIBRATION — BATCH MODE ({len(sensors_to_process)} sensors)")
+        print(f"  Sensors: {', '.join(sensors_to_process)}")
+        print("=" * 60)
+        print()
+    elif arg:
+        sensors_to_process = [arg]
+        batch_mode = False
+    else:
+        # Auto-detect from input folder
+        import re
+        detected = set()
+        for f in input_dir.iterdir():
+            m = re.search(r'(sensor\d{2})', f.name)
+            if m:
+                detected.add(m.group(1))
+        if len(detected) == 1:
+            sensors_to_process = sorted(detected)
+            batch_mode = False
+            print(f"Auto-detected sensor: {sensors_to_process[0]}\n")
+        elif len(detected) > 1:
+            sensors_to_process = sorted(detected)
+            batch_mode = True
+            print(f"Auto-detected {len(sensors_to_process)} sensors — running batch.\n")
+        else:
+            print("[ERROR] No sensor files found in input directory.")
+            sys.exit(1)
+
+    processed, failed = [], []
+    for sid in sensors_to_process:
+        ok = process_single_calibration(sid, script_dir)
+        (processed if ok else failed).append(sid)
+
+    if batch_mode:
+        print()
+        print("=" * 60)
+        print(f"BATCH COMPLETE: {len(processed)}/{len(sensors_to_process)} succeeded")
+        if failed:
+            print(f"  Failed: {', '.join(failed)}")
+        print("=" * 60)
+        print()
+        print("Next step: python 02_validate_calibration.py all")
+    elif failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
+
