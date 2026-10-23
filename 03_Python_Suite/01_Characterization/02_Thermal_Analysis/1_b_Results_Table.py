@@ -14,7 +14,8 @@ import numpy as np
 import sys
 from pathlib import Path
 
-OUTPUT_DIR = Path.cwd() / "1_b_Results_Table"
+SCRIPT_DIR = Path(__file__).parent
+OUTPUT_DIR = SCRIPT_DIR / "1_b_Results_Table"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 PLOT_ORDER_KEYS = [
@@ -34,7 +35,7 @@ CHANNEL_LABEL_MAP = {
     "raw_ch12": "860 nm", "raw_ch17": "900 nm", "raw_ch18": "940 nm"
 }
 
-INPUT_DATA_FILE = "0_Measurements/temperature_sweep_data.csv"
+INPUT_DATA_FILE = SCRIPT_DIR / "0_Measurements/temperature_sweep_data.csv"
 OUTPUT_CSV_FILE = OUTPUT_DIR / "temperature_correction_coefficients_table.csv"
 REFERENCE_TEMPERATURE = 25.0
 POLYNOMIAL_DEGREE = 2
@@ -46,7 +47,7 @@ SUBSAMPLE_MAX_PER_BIN = 25
 
 print(f"Loading data from: {INPUT_DATA_FILE}")
 try:
-    df = pd.read_csv(INPUT_DATA_FILE)
+    df = pd.read_csv(str(INPUT_DATA_FILE))
 except FileNotFoundError:
     print(f"ERROR: Cannot find file '{INPUT_DATA_FILE}'.")
     sys.exit()
@@ -132,7 +133,7 @@ pd.set_option('display.max_columns', None)
 pd.set_option('display.width', 1000)
 display_df = results_df.copy()
 numeric_cols = display_df.select_dtypes(include=[np.number]).columns
-display_df[numeric_cols[:3]] = display_df[numeric_cols[:3]].applymap(lambda x: f"{x:.4e}")
-display_df[numeric_cols[3:]] = display_df[numeric_cols[3:]].applymap(lambda x: f"{x:.4f}")
+display_df[numeric_cols[:3]] = display_df[numeric_cols[:3]].map(lambda x: f"{x:.4e}")
+display_df[numeric_cols[3:]] = display_df[numeric_cols[3:]].map(lambda x: f"{x:.4f}")
 print(display_df)
 print("-------------------------------")

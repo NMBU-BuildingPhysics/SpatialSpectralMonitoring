@@ -26,6 +26,41 @@ ENABLE_SATURATION_PATCHING = True
 # ============================================================================
 
 
+def find_all_sensor_ids(workspace: Path) -> List[str]:
+    """
+    Scan for all sensor IDs that have response files or pre-existing HDR files.
+
+    Checks:
+      - 02_generate_response_output/ for *.rsp files
+      - 01_define_roi_input/ for device-generated *.hdr files
+      - 04_map_calibration_points_input/ for device-generated *.hdr files
+
+    Args:
+        workspace: Path to the script's directory
+
+    Returns:
+        Sorted list of unique sensor IDs.
+    """
+    sensor_ids = set()
+
+    rsp_dir = workspace / '02_generate_response_output'
+    if rsp_dir.exists():
+        for f in rsp_dir.glob('*.rsp'):
+            match = re.search(r'(sensor\d{2})', f.stem)
+            if match:
+                sensor_ids.add(match.group(1))
+
+    for hdr_dir_name in ('01_define_roi_input', '04_map_calibration_points_input'):
+        hdr_dir = workspace / hdr_dir_name
+        if hdr_dir.exists():
+            for f in hdr_dir.glob('*.hdr'):
+                match = re.search(r'(sensor\d{2})', f.name)
+                if match:
+                    sensor_ids.add(match.group(1))
+
+    return sorted(sensor_ids)
+
+
 def parse_response_file(response_file: str, base_path: Path) -> Tuple[List[float], List[str]]:
     """
     Parse response file to get exposures and image paths.
@@ -213,26 +248,51 @@ def create_hdr_opencv(
         return False
 
 
-def main():
+def process_single_sensor_hdr(sensor_id: str, workspace_root: Path) -> bool:
     """
-    Main function to generate HDR using OpenCV.
-    """
-    sensor_id = sys.argv[1] if len(sys.argv) > 1 else "sensor11"
+    Process HDR generation for a single sensor.
 
-    workspace_root = Path(__file__).parent
+    Output file: {sensor_id}_Raw.hdr (capital R).
+    Skips if output already exists (checks both new _Raw.hdr and legacy _raw.hdr).
+    Also skips JPEG merge if a pre-existing device HDR is found in
+    04_map_calibration_points_input/.
+
+    Returns:
+        True if successful or already done/skipped, False on error.
+    """
     response_file = workspace_root / '02_generate_response_output' / f'{sensor_id}.rsp'
     output_dir = workspace_root / '03_generate_hdr_output'
-    output_hdr = output_dir / f'{sensor_id}_raw.hdr'
+    output_hdr = output_dir / f'{sensor_id}_Raw.hdr'
+    output_hdr_legacy = output_dir / f'{sensor_id}_raw.hdr'
+    input_hdr_dir = workspace_root / '04_map_calibration_points_input'
 
     print("=" * 70)
-    print("Phase 3: HDR Generation (OpenCV Debevec)")
+    print(f"Phase 3: HDR Generation (OpenCV Debevec) — {sensor_id}")
     print("=" * 70)
     print()
+
+    # Skip if output already exists
+    if output_hdr.exists():
+        print(f"Skipping (already exists): {output_hdr.name}")
+        return True
+    if output_hdr_legacy.exists():
+        print(f"Skipping (already exists, legacy name): {output_hdr_legacy.name}")
+        return True
+
+    # Check for pre-existing device-generated HDR in either input folder
+    for hdr_dir in (workspace_root / '01_define_roi_input', input_hdr_dir):
+        if hdr_dir.exists():
+            existing_hdrs = sorted(hdr_dir.glob(f'*{sensor_id}*.hdr'))
+            if existing_hdrs:
+                print(f"Using pre-existing HDR from {hdr_dir.name}: {existing_hdrs[0].name}")
+                print(f"  (Skipping JPEG merge — device-generated HDR found)")
+                print()
+                return True
 
     if not response_file.exists():
         print(f"Error: Response file not found: {response_file}")
         print("Please run Phase 2 first to generate the response file.")
-        sys.exit(1)
+        return False
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -252,7 +312,7 @@ def main():
     if not success:
         print()
         print("[ERROR] HDR generation failed!")
-        sys.exit(1)
+        return False
 
     print()
     print("=" * 70)
@@ -261,7 +321,81 @@ def main():
     print()
     print(f"HDR file: {output_hdr}")
     print()
-    print("Next steps Phase 4: Map calibration points interactively")
+    print("Next step: Map calibration points interactively")
+    return True
+
+
+def main():
+    """
+    Main function to generate HDR using OpenCV. Supports single-sensor and
+    batch ('all') modes.
+    """
+    workspace_root = Path(__file__).parent
+    explicit_arg = sys.argv[1] if len(sys.argv) > 1 else None
+
+    all_sensor_ids = find_all_sensor_ids(workspace_root)
+
+    if explicit_arg == 'all':
+        batch_mode = True
+        sensors_to_process = all_sensor_ids if all_sensor_ids else []
+    elif explicit_arg is not None:
+        batch_mode = False
+        sensors_to_process = [explicit_arg]
+    elif len(all_sensor_ids) > 1:
+        batch_mode = True
+        sensors_to_process = all_sensor_ids
+        print(f"Auto-detected {len(all_sensor_ids)} sensors. Running batch mode.")
+        print()
+    elif len(all_sensor_ids) == 1:
+        batch_mode = False
+        sensors_to_process = all_sensor_ids
+    else:
+        batch_mode = False
+        sensors_to_process = ['sensor11']
+
+    if batch_mode:
+        print("=" * 70)
+        print("PHASE 3: HDR GENERATION (BATCH MODE)")
+        print("=" * 70)
+        print(f"Sensors to process ({len(sensors_to_process)}): {', '.join(sensors_to_process)}")
+        print()
+
+        processed = []
+        failed = []
+        n = len(sensors_to_process)
+
+        for i, sensor_id in enumerate(sensors_to_process, 1):
+            print(f"\n{'─' * 70}")
+            print(f"Processing sensor {i} of {n}: {sensor_id}")
+            print(f"{'─' * 70}\n")
+            try:
+                ok = process_single_sensor_hdr(sensor_id, workspace_root)
+                (processed if ok else failed).append(sensor_id)
+            except Exception as e:
+                print(f"[ERROR] Failed to process {sensor_id}: {e}")
+                import traceback
+                traceback.print_exc()
+                failed.append(sensor_id)
+
+        print()
+        print("=" * 70)
+        print("BATCH COMPLETE")
+        print("=" * 70)
+        print(f"Processed {len(processed)} of {n} sensors.")
+        if processed:
+            print(f"  Success: {', '.join(processed)}")
+        if failed:
+            print(f"  Failed:  {', '.join(failed)}")
+        print()
+        print("Next step:")
+        print("  python 04_map_cal_points.py all")
+        print()
+    else:
+        sensor_id = sensors_to_process[0]
+        ok = process_single_sensor_hdr(sensor_id, workspace_root)
+        if not ok:
+            sys.exit(1)
+
 
 if __name__ == '__main__':
     main()

@@ -127,38 +127,54 @@ def fit_vignetting_model(distances: np.ndarray, relative_falloff: np.ndarray) ->
         return coeffs, max_dist, poly
 
 
-def create_vignetting_correction_map(shape: Tuple[int, int], 
+def create_vignetting_correction_map(shape: Tuple[int, int],
                                      center: Tuple[int, int],
                                      model_func,
-                                     max_dist: float) -> np.ndarray:
+                                     max_dist: float,
+                                     roi_data: Dict = None) -> np.ndarray:
     """
     Create vignetting correction map for entire image.
-    
+
+    Pixels outside the ROI ellipse are left at 1.0 (no correction) since
+    they will be masked/cropped in downstream steps.
+    Normalized distances are clamped to 1.0 so the polynomial is never
+    extrapolated beyond the outermost calibration point.
+
     Args:
         shape: Image shape (height, width)
         center: Fisheye center (x, y)
         model_func: Function that maps normalized radius to vignetting factor
-        max_dist: Maximum distance for normalization
-    
+        max_dist: Maximum distance for normalization (outermost cal point)
+        roi_data: Optional ROI dict with center_x, center_y, radius_x, radius_y
+
     Returns:
         Correction map (multiply HDR by this to correct vignetting)
     """
     h, w = shape
-    y, x = np.ogrid[:h, :w]
-    
-    dx = x - center[0]
-    dy = y - center[1]
+    y_grid, x_grid = np.ogrid[:h, :w]
+
+    dx = x_grid - center[0]
+    dy = y_grid - center[1]
     distances = np.sqrt(dx**2 + dy**2)
-    
-    norm_distances = distances / max_dist
-    
+
+    # Clamp to max_dist — no extrapolation beyond outermost calibration point
+    norm_distances = np.clip(distances / max_dist, 0.0, 1.0)
+
     vignetting_factor = model_func(norm_distances)
-    
     vignetting_factor = np.clip(vignetting_factor, 0.1, 1.0)
     correction_map = 1.0 / vignetting_factor
-    
     correction_map = np.clip(correction_map, 1.0, 10.0)
-    
+
+    # Pixels outside the ROI ellipse get no correction (they are masked anyway)
+    if roi_data is not None:
+        cx = roi_data['center_x']
+        cy = roi_data['center_y']
+        rx = roi_data['radius_x']
+        ry = roi_data['radius_y']
+        y_full, x_full = np.mgrid[:h, :w]
+        outside_ellipse = ((x_full - cx) / rx) ** 2 + ((y_full - cy) / ry) ** 2 > 1.0
+        correction_map[outside_ellipse] = 1.0
+
     return correction_map
 
 
@@ -170,28 +186,26 @@ def apply_vignetting_correction(hdr: np.ndarray, correction_map: np.ndarray) -> 
     return corrected_hdr
 
 
-def visualize_vignetting(distances: np.ndarray, 
+def visualize_vignetting(distances: np.ndarray,
                          measured_falloff: np.ndarray,
                          model_func,
                          max_dist: float,
-                         output_path: Path):
+                         output_path: Path,
+                         image_shape: Tuple[int, int] = None):
     """Create visualization of vignetting model."""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-    
-    norm_distances = distances / max_dist
+
     ax1.scatter(distances, measured_falloff, s=100, alpha=0.6, label='Measured')
-    
     x_smooth = np.linspace(0, max_dist, 100)
     y_smooth = model_func(x_smooth / max_dist)
     ax1.plot(x_smooth, y_smooth, 'r-', linewidth=2, label='Fitted model')
-    
     ax1.set_xlabel('Distance from Center (pixels)', fontsize=12)
     ax1.set_ylabel('Relative Luminance', fontsize=12)
     ax1.set_title('Vignetting: Measured vs Model', fontsize=14)
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     ax1.set_ylim([0, 1.1])
-    
+
     correction_factors = 1.0 / np.clip(model_func(x_smooth / max_dist), 0.1, 1.0)
     ax2.plot(x_smooth, correction_factors, 'b-', linewidth=2)
     ax2.set_xlabel('Distance from Center (pixels)', fontsize=12)
@@ -200,11 +214,11 @@ def visualize_vignetting(distances: np.ndarray,
     ax2.grid(True, alpha=0.3)
     ax2.axhline(y=1.0, color='gray', linestyle='--', alpha=0.5)
     ax2.set_ylim([0.9, correction_factors.max() + 0.2])
-    
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
-    
+
     print(f"Vignetting visualization saved: {output_path}")
 
 
@@ -225,9 +239,35 @@ def process_sensor(sensor_id: str, workspace: Path):
     print(f"  Calibration points: {len(cal_points)}")
     
     print("\n[2/7] Loading uncalibrated HDR...")
-    hdr_path = workspace / '03_generate_hdr_output' / f'{sensor_id}_raw.hdr'
+    # Check for HDR in priority order: new _Raw suffix, legacy _raw, input folders
+    _hdr_candidates = [
+        workspace / '03_generate_hdr_output' / f'{sensor_id}_Raw.hdr',
+        workspace / '03_generate_hdr_output' / f'{sensor_id}_raw.hdr',
+        workspace / '04_map_calibration_points_input' / f'{sensor_id}_Raw.hdr',
+        workspace / '04_map_calibration_points_input' / f'{sensor_id}_raw.hdr',
+    ]
+    # Accept any .hdr matching sensor_id in either device-HDR input folder
+    for _dir_name in ('04_map_calibration_points_input', '01_define_roi_input'):
+        _dir = workspace / _dir_name
+        if _dir.exists():
+            _hdr_candidates += sorted(_dir.glob(f'*{sensor_id}*.hdr'))
+
+    hdr_path = None
+    for _c in _hdr_candidates:
+        if _c.exists():
+            hdr_path = _c
+            break
+
+    if hdr_path is None:
+        print(f"[ERROR] No HDR file found for {sensor_id}.")
+        print("  Checked:")
+        for _c in _hdr_candidates[:4]:
+            print(f"    {_c}")
+        sys.exit(1)
+
+    print(f"  Loading: {hdr_path}")
     hdr = cv2.imread(str(hdr_path), cv2.IMREAD_ANYDEPTH | cv2.IMREAD_COLOR)
-    
+
     if hdr is None:
         print(f"[ERROR] Could not load HDR: {hdr_path}")
         sys.exit(1)
@@ -259,7 +299,8 @@ def process_sensor(sensor_id: str, workspace: Path):
         (hdr.shape[0], hdr.shape[1]),
         fisheye_center,
         model_func,
-        max_dist
+        max_dist,
+        roi_data=roi_data
     )
     print(f"  Correction range: [{correction_map.min():.2f}x, {correction_map.max():.2f}x]")
     
@@ -269,16 +310,13 @@ def process_sensor(sensor_id: str, workspace: Path):
     print(f"  Before correction - mean: {np.mean(hdr):.6f}")
     print(f"  After correction  - mean: {np.mean(corrected_hdr):.6f}")
     
-    output_hdr = output_dir / f'{sensor_id}_vignetting_corrected.hdr'
+    output_hdr = output_dir / f'{sensor_id}_Vin.hdr'
     cv2.imwrite(str(output_hdr), corrected_hdr.astype(np.float32))
     print(f"\n  Saved: {output_hdr}")
     
-    correction_map_path = output_dir / f'{sensor_id}_vignetting_correction_map.npy'
-    np.save(correction_map_path, correction_map)
-    print(f"  Saved: {correction_map_path}")
-    
     vis_path = output_dir / f'{sensor_id}_vignetting_plot.png'
-    visualize_vignetting(distances, relative_falloff, model_func, max_dist, vis_path)
+    visualize_vignetting(distances, relative_falloff, model_func, max_dist, vis_path,
+                         image_shape=(hdr.shape[0], hdr.shape[1]))
     
     report = {
         'sensor_id': sensor_id,
@@ -294,7 +332,8 @@ def process_sensor(sensor_id: str, workspace: Path):
                 'max': float(correction_map.max())
             },
             'polynomial_degree': len(popt) - 1,
-            'polynomial_coeffs': popt.tolist()
+            'polynomial_coeffs': popt.tolist(),
+            'max_distance': float(max_dist),
         },
         'statistics': {
             'before_mean': float(np.mean(hdr)),
@@ -320,13 +359,15 @@ def process_sensor(sensor_id: str, workspace: Path):
 
 def main():
     workspace = Path(__file__).parent.resolve()
-    
-    if len(sys.argv) >= 2:
-        sensor_id = sys.argv[1]
+
+    arg = sys.argv[1] if len(sys.argv) >= 2 else None
+
+    if arg and arg.lower() != 'all':
+        sensor_id = arg
         print(f"Processing single sensor: {sensor_id}\n")
         process_sensor(sensor_id, workspace)
     else:
-        print("No sensor_id provided. Auto-detecting sensors from calibration points...\n")
+        print("Auto-detecting sensors from calibration points...\n")
         try:
             sensor_ids = find_sensor_ids(workspace)
             print(f"Found {len(sensor_ids)} sensor(s): {', '.join(sensor_ids)}\n")

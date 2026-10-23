@@ -11,7 +11,8 @@
 
 param(
     [string]$SensorId = "sensor11",
-    [string]$CsvFile = ""
+    [string]$CsvFile = "",
+    [switch]$All
 )
 
 function Write-Success { Write-Host $args -ForegroundColor Green }
@@ -35,10 +36,61 @@ $CharInputDir = Join-Path $CharacterizationDir "04_map_calibration_points_input"
 $CharOutputDir = Join-Path $CharacterizationDir "04_map_calibration_points_output"
 
 Write-Info "Configuration:"
-Write-Host "  Sensor ID:             $SensorId"
+Write-Host "  Sensor ID:             $(if ($All -or $SensorId -eq 'all') { 'all' } else { $SensorId })"
 Write-Host "  Local Input:           $LocalInputDir"
 Write-Host "  Characterization Dir:  $CharacterizationDir"
 Write-Host ""
+
+# ===========================================================================
+# BATCH MODE: delegate everything to the Python script which handles multi-
+# sensor iteration, previous-sensor overlay, and batch prompts natively.
+# ===========================================================================
+if ($All -or $SensorId -ieq 'all') {
+    Write-Info "Batch mode: running 04_map_cal_points.py all"
+    Write-Host ""
+
+    # Find CSV in local input folder (shared across all sensors)
+    if ($CsvFile -eq "") {
+        $CsvFiles = Get-ChildItem -Path $LocalInputDir -Filter "*.csv" -ErrorAction SilentlyContinue
+        if ($CsvFiles -and $CsvFiles.Count -gt 0) {
+            $CsvPath = $CsvFiles[0].FullName
+            Write-Success "  Using CSV: $($CsvFiles[0].Name)"
+        } else {
+            $CsvPath = $null
+        }
+    } else {
+        $CsvPath = Join-Path $LocalInputDir $CsvFile
+    }
+
+    $PythonArgs = "all"
+    if ($CsvPath -and (Test-Path $CsvPath)) {
+        # Copy shared CSV to characterization input so the Python script can find it
+        $CharInputDir = Join-Path $CharacterizationDir "04_map_calibration_points_input"
+        if (-not (Test-Path $CharInputDir)) { New-Item -ItemType Directory -Path $CharInputDir -Force | Out-Null }
+        Copy-Item -Path $CsvPath -Destination (Join-Path $CharInputDir (Split-Path -Leaf $CsvPath)) -Force
+        $PythonArgs = "all `"$CsvPath`""
+    }
+
+    $PythonCmd = "python `"$MapScriptPath`" $PythonArgs"
+    Write-Host "Running: $PythonCmd" -ForegroundColor DarkGray
+    Write-Host ""
+
+    Invoke-Expression $PythonCmd
+    $ExitCode = $LASTEXITCODE
+
+    Write-Host ""
+    if ($ExitCode -eq 0) {
+        Write-Host "============================================================================" -ForegroundColor Green
+        Write-Host "BATCH CALIBRATION MAPPING COMPLETE!" -ForegroundColor Green
+        Write-Host "============================================================================" -ForegroundColor Green
+        Write-Host ""
+        Write-Info "Next Step:"
+        Write-Host "  Run calibration: python 01_apply_calibration.py all"
+    } else {
+        Write-Error "Mapping exited with code $ExitCode"
+    }
+    exit $ExitCode
+}
 
 if (-not (Test-Path $LocalInputDir)) {
     Write-Error "ERROR: Local input directory not found: $LocalInputDir"
@@ -84,22 +136,32 @@ if ($CsvFile -eq "") {
     Write-Success "  Using CSV: $CsvFile"
 }
 
-$HdrFileName = "${SensorId}_raw.hdr"
+$HdrFileName        = "${SensorId}_raw.hdr"
+$HdrFileNameRaw     = "${SensorId}_Raw.hdr"
 $VignettingHdrFileName = "${SensorId}_vignetting_corrected.hdr"
+$VignHdrFileNameVin = "${SensorId}_Vin.hdr"
 
 $LocalHdrPath = $null
-if (Test-Path (Join-Path $LocalInputDir $VignettingHdrFileName)) {
+if (Test-Path (Join-Path $LocalInputDir $VignHdrFileNameVin)) {
+    $LocalHdrPath = Join-Path $LocalInputDir $VignHdrFileNameVin
+    Write-Success "  Found HDR: $VignHdrFileNameVin (vignetting-corrected)"
+} elseif (Test-Path (Join-Path $LocalInputDir $VignettingHdrFileName)) {
     $LocalHdrPath = Join-Path $LocalInputDir $VignettingHdrFileName
     Write-Success "  Found HDR: $VignettingHdrFileName (vignetting-corrected)"
+} elseif (Test-Path (Join-Path $LocalInputDir $HdrFileNameRaw)) {
+    $LocalHdrPath = Join-Path $LocalInputDir $HdrFileNameRaw
+    Write-Success "  Found HDR: $HdrFileNameRaw (raw)"
 } elseif (Test-Path (Join-Path $LocalInputDir $HdrFileName)) {
     $LocalHdrPath = Join-Path $LocalInputDir $HdrFileName
     Write-Success "  Found HDR: $HdrFileName (raw)"
 } else {
     Write-Error "ERROR: No HDR file found for $SensorId in $LocalInputDir"
     Write-Host ""
-    Write-Host "Expected files:"
-    Write-Host "  - ${SensorId}_vignetting_corrected.hdr (recommended)"
-    Write-Host "  - ${SensorId}_raw.hdr (fallback)"
+    Write-Host "Expected files (any of):"
+    Write-Host "  - ${SensorId}_Vin.hdr (recommended)"
+    Write-Host "  - ${SensorId}_vignetting_corrected.hdr"
+    Write-Host "  - ${SensorId}_Raw.hdr (raw fallback)"
+    Write-Host "  - ${SensorId}_raw.hdr (legacy raw fallback)"
     Write-Host ""
     Write-Host "Please copy an HDR file from the characterization workflow to the input folder."
     exit 1

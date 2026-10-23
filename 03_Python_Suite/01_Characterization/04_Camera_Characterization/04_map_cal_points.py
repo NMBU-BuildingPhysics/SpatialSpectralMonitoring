@@ -17,6 +17,7 @@ import re
 import sys
 import csv
 from pathlib import Path
+from typing import List
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_FOLDER = os.path.abspath(os.path.join(PROJECT_DIR, "04_map_calibration_points_input"))
@@ -28,6 +29,35 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 MAX_DISPLAY_WIDTH = 1200
 MAX_DISPLAY_HEIGHT = 900
+
+
+def find_all_sensor_ids(workspace: Path) -> List[str]:
+    """
+    Scan for all sensor IDs that have available HDR files.
+
+    Checks:
+      - 01_define_roi_input/ for any *.hdr files
+      - 03_generate_hdr_output/ for any *.hdr files
+      - 04_map_calibration_points_input/ for any *.hdr files
+
+    Args:
+        workspace: Path to the script's directory
+
+    Returns:
+        Sorted list of unique sensor IDs.
+    """
+    sensor_ids = set()
+
+    for dir_name in ('01_define_roi_input', '03_generate_hdr_output', '04_map_calibration_points_input'):
+        hdr_dir = workspace / dir_name
+        if hdr_dir.exists():
+            for f in hdr_dir.glob('*.hdr'):
+                match = re.search(r'(sensor\d{2})', f.name)
+                if match:
+                    sensor_ids.add(match.group(1))
+
+    return sorted(sensor_ids)
+
 
 def load_calibration_csv(csv_path):
     """
@@ -103,31 +133,63 @@ def load_calibration_csv(csv_path):
 def find_hdr_file(sensor_id):
     """
     Find HDR file for the given sensor ID.
-    
-    Checks 04_map_calibration_points_input first (priority),
-    then falls back to 03_generate_hdr_output.
-    
+
+    Priority:
+      1. 04_map_calibration_points_input/{sensor_id}*_Vin.hdr  (vignetting-corrected)
+      2. 04_map_calibration_points_input/{sensor_id}*_Raw.hdr  (new naming)
+      3. Any 04_map_calibration_points_input/{sensor_id}*.hdr  (device HDR etc.)
+      4. 03_generate_hdr_output/{sensor_id}_Raw.hdr            (new naming)
+      5. 03_generate_hdr_output/{sensor_id}_raw.hdr            (backward compat)
+
     Args:
         sensor_id (str): Sensor ID (e.g., "sensor11")
-        
+
     Returns:
         tuple: (hdr_path, source_folder) or (None, None) if not found
     """
-    hdr_filename = f"{sensor_id}_raw.hdr"
-    
-    priority_path = os.path.join(HDR_INPUT_FOLDER, hdr_filename)
-    if os.path.exists(priority_path):
-        print(f"✓ Found HDR file in 04_map_calibration_points_input: {hdr_filename}")
-        return priority_path, "04_map_calibration_points_input"
-        
-    fallback_path = os.path.join(HDR_FALLBACK_FOLDER, hdr_filename)
-    if os.path.exists(fallback_path):
-        print(f"✓ Found HDR file in 03_generate_hdr_output: {hdr_filename}")
-        return fallback_path, "03_generate_hdr_output"
-        
-    print(f"✗ HDR file not found in either location:")
-    print(f"  - {priority_path}")
-    print(f"  - {fallback_path}")
+    input_dir = Path(HDR_INPUT_FOLDER)
+    fallback_dir = Path(HDR_FALLBACK_FOLDER)
+
+    # Priority 1: vignetting-corrected HDR in input folder
+    vin_matches = sorted(input_dir.glob(f'{sensor_id}*_Vin.hdr'))
+    if vin_matches:
+        print(f"✓ Found vignetting-corrected HDR in input folder: {vin_matches[0].name}")
+        return str(vin_matches[0]), "04_map_calibration_points_input"
+
+    # Priority 2: _Raw HDR in input folder (new naming)
+    raw_cap_matches = sorted(input_dir.glob(f'{sensor_id}*_Raw.hdr'))
+    if raw_cap_matches:
+        print(f"✓ Found Raw HDR in input folder: {raw_cap_matches[0].name}")
+        return str(raw_cap_matches[0]), "04_map_calibration_points_input"
+
+    # Priority 3: Any HDR matching sensor_id in input folder
+    any_matches = sorted(input_dir.glob(f'{sensor_id}*.hdr'))
+    if any_matches:
+        print(f"✓ Found HDR in input folder: {any_matches[0].name}")
+        return str(any_matches[0]), "04_map_calibration_points_input"
+
+    # Priority 4: Any device HDR in 01_define_roi_input/ (new pipeline)
+    roi_dir = Path(PROJECT_DIR) / '01_define_roi_input'
+    roi_matches = sorted(roi_dir.glob(f'*{sensor_id}*.hdr')) if roi_dir.exists() else []
+    if roi_matches:
+        print(f"✓ Found device HDR in 01_define_roi_input: {roi_matches[0].name}")
+        return str(roi_matches[0]), "01_define_roi_input"
+
+    # Priority 5: New naming in HDR output folder
+    new_fallback = fallback_dir / f'{sensor_id}_Raw.hdr'
+    if new_fallback.exists():
+        print(f"✓ Found HDR in 03_generate_hdr_output: {new_fallback.name}")
+        return str(new_fallback), "03_generate_hdr_output"
+
+    # Priority 6: Legacy naming in HDR output folder
+    legacy_fallback = fallback_dir / f'{sensor_id}_raw.hdr'
+    if legacy_fallback.exists():
+        print(f"✓ Found HDR in 03_generate_hdr_output: {legacy_fallback.name}")
+        return str(legacy_fallback), "03_generate_hdr_output"
+
+    print(f"✗ HDR file not found for {sensor_id}")
+    print(f"  Checked: {input_dir}")
+    print(f"  Checked: {fallback_dir}")
     return None, None
 
 
@@ -185,20 +247,25 @@ class CalibrationMapper:
     automatically assigns luminance values in sequential order.
     """
     
-    def __init__(self, hdr_path, luminance_values, point_labels):
+    def __init__(self, hdr_path, luminance_values, point_labels,
+                 previous_points_overlay=None):
         """
         Initialize the calibration mapper.
-        
+
         Args:
             hdr_path (str): Path to HDR image file
             luminance_values (list): List of luminance values in cd/m²
             point_labels (list): List of point labels
+            previous_points_overlay (list, optional): List of point dicts from a
+                previous sensor's calibration JSON, used as a visual reference
+                overlay only (no interaction).
         """
         self.hdr_path = hdr_path
         self.points = []
         self.current_point_index = 0
         self.luminance_values = luminance_values.copy()
         self.point_labels = point_labels.copy()
+        self.previous_points_overlay = previous_points_overlay or []
         self.sensor_id = self._extract_sensor_id(hdr_path)
         self.hdr_image = None
         self.display_image = None
@@ -209,7 +276,7 @@ class CalibrationMapper:
         self.magnifier_zoom = 10
         self.hover_x = None
         self.hover_y = None
-        
+
         self.all_points_marked_printed = False
         
     def _extract_sensor_id(self, hdr_path):
@@ -368,12 +435,34 @@ class CalibrationMapper:
         for point in self.points:
             draw_x = int(point["x"] * self.display_scale)
             draw_y = int(point["y"] * self.display_scale)
-            
+
             cv2.circle(temp_disp, (draw_x, draw_y), 5, (0, 0, 255), -1)
-            
+
             label_text = f"{point['id']}"
             cv2.putText(temp_disp, label_text, (draw_x + 8, draw_y - 8),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+        # Draw previous sensor overlay (visual reference only, no interaction)
+        if self.previous_points_overlay:
+            overlay_color = (180, 100, 30)  # dim blue-teal (BGR)
+            cross_size = 6
+            for ov_point in self.previous_points_overlay:
+                ov_x = int(ov_point["x"] * self.display_scale)
+                ov_y = int(ov_point["y"] * self.display_scale)
+                # Draw small "x" marker
+                cv2.line(temp_disp,
+                         (ov_x - cross_size, ov_y - cross_size),
+                         (ov_x + cross_size, ov_y + cross_size),
+                         overlay_color, 1)
+                cv2.line(temp_disp,
+                         (ov_x + cross_size, ov_y - cross_size),
+                         (ov_x - cross_size, ov_y + cross_size),
+                         overlay_color, 1)
+                lbl = str(ov_point.get("id", ""))
+                cv2.putText(temp_disp, lbl, (ov_x + 5, ov_y - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.45, overlay_color, 1)
+            cv2.putText(temp_disp, "Ref: previous sensor", (10, 55),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.55, overlay_color, 1)
         
         if self.current_point_index < len(self.luminance_values):
             next_label = self.point_labels[self.current_point_index]
@@ -517,64 +606,241 @@ class CalibrationMapper:
         return saved
 
 
+def _run_single_sensor_mapping(sensor_id, luminance_values, point_labels,
+                               previous_overlay=None):
+    """
+    Run calibration mapping for a single sensor.
+
+    Args:
+        sensor_id: Sensor identifier
+        luminance_values: List of reference luminance values
+        point_labels: List of point labels
+        previous_overlay: Optional list of point dicts from previous sensor's JSON
+
+    Returns:
+        True if points were saved, False otherwise.
+    """
+    print(f"\nSensor ID: {sensor_id}")
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+    print("\nLooking for HDR file...")
+    hdr_path, hdr_source = find_hdr_file(sensor_id)
+
+    if hdr_path is None:
+        print(f"\n\u2717 Error: HDR file not found for {sensor_id}")
+        print("Please run Phase 3 (03_generate_hdr.py) first to generate the HDR image.")
+        return False
+
+    print(f"\nStarting calibration mapper...\n")
+    mapper = CalibrationMapper(hdr_path, luminance_values, point_labels,
+                               previous_points_overlay=previous_overlay)
+    return mapper.run()
+
+
+def _run_batch_mode(workspace, all_sensors, luminance_values, point_labels):
+    """
+    Run batch calibration mapping across all sensors with interactive prompts.
+
+    Args:
+        workspace: Path to script directory
+        all_sensors: Sorted list of all sensor IDs with HDR files
+        luminance_values: Shared luminance reference values
+        point_labels: Shared point labels
+
+    Returns:
+        Exit code (0 = success).
+    """
+    output_path_for = lambda sid: os.path.join(OUTPUT_FOLDER,
+                                                f"{sid}_calibration_points.json")
+
+    done = [s for s in all_sensors if os.path.exists(output_path_for(s))]
+    pending = [s for s in all_sensors if not os.path.exists(output_path_for(s))]
+
+    # Print status table
+    print("\n" + "=" * 60)
+    print("CALIBRATION POINT MAPPING \u2014 STATUS")
+    print("=" * 60)
+    for sensor_id in all_sensors:
+        mark = "\u2713" if sensor_id in done else "\u2717"
+        status = "done" if sensor_id in done else "pending"
+        print(f"  {mark} {sensor_id} \u2014 {status}")
+    print()
+    print(f"Done: {len(done)}/{len(all_sensors)}   Pending: {len(pending)}/{len(all_sensors)}")
+    print()
+
+    if not pending:
+        print("All sensors already processed!")
+
+    user_input = input(
+        "Process all pending sensors? [y/n/r=redo all] or enter a sensor ID to redo: "
+    ).strip()
+
+    if user_input.lower() == 'n':
+        print("Cancelled.")
+        return 0
+    elif user_input.lower() == 'y':
+        to_process = pending if pending else []
+    elif user_input.lower() == 'r':
+        to_process = all_sensors
+    elif user_input in all_sensors:
+        to_process = [user_input]
+    else:
+        print(f"Unknown input: '{user_input}'")
+        return 1
+
+    if not to_process:
+        print("Nothing to process.")
+        return 0
+
+    completed = []
+    n = len(to_process)
+
+    for i, sensor_id in enumerate(to_process, 1):
+        print(f"\n{'=' * 60}")
+        print(f"Sensor {i}/{n}: {sensor_id}")
+        print(f"{'=' * 60}")
+
+        # Load previous sensor's calibration points as visual overlay
+        sorted_idx = all_sensors.index(sensor_id)
+        previous_overlay = None
+        if sorted_idx > 0:
+            prev_sensor = all_sensors[sorted_idx - 1]
+            prev_json_path = output_path_for(prev_sensor)
+            if os.path.exists(prev_json_path):
+                try:
+                    with open(prev_json_path) as f:
+                        prev_data = json.load(f)
+                    previous_overlay = prev_data.get('points', [])
+                except Exception:
+                    pass
+
+        success = _run_single_sensor_mapping(sensor_id, luminance_values, point_labels,
+                                             previous_overlay=previous_overlay)
+        if success:
+            completed.append(sensor_id)
+            print(f"\nCompleted {sensor_id} ({i}/{n})")
+
+        if i < n:
+            input("Press Enter to continue to next sensor...")
+
+    print(f"\n{'=' * 60}")
+    print(f"BATCH COMPLETE \u2014 {len(completed)}/{n} sensors calibrated")
+    print(f"{'=' * 60}")
+    for sid in all_sensors:
+        mark = "\u2713" if os.path.exists(output_path_for(sid)) else "\u2717"
+        print(f"  {mark} {sid}")
+    return 0
+
+
 def main():
-    """Main entry point for the calibration mapper."""
-    print("\n" + "="*80)
+    """Main entry point for the calibration mapper. Supports batch and single modes."""
+    print("\n" + "=" * 80)
     print("CALIBRATION POINT MAPPER - INITIALIZATION")
-    print("="*80 + "\n")
-    
-    sensor_id = sys.argv[1] if len(sys.argv) > 1 else "sensor11"
-    print(f"Sensor ID: {sensor_id}")
-    
+    print("=" * 80 + "\n")
+
+    workspace = Path(PROJECT_DIR)
+    explicit_arg = sys.argv[1] if len(sys.argv) > 1 else None
+
+    # Load CSV (shared across sensors)
     csv_path = None
     if len(sys.argv) > 2:
         csv_path = sys.argv[2]
     else:
         csv_files = list(Path(INPUT_FOLDER).glob("*.csv"))
         if csv_files:
-            print(f"\nFound {len(csv_files)} CSV file(s) in {INPUT_FOLDER}:")
+            print(f"Found {len(csv_files)} CSV file(s) in {INPUT_FOLDER}:")
             for i, csv_file in enumerate(csv_files, 1):
                 print(f"  {i}. {csv_file.name}")
             csv_path = str(csv_files[0])
             print(f"\nUsing: {csv_files[0].name}")
         else:
-            print(f"\n✗ No CSV files found in {INPUT_FOLDER}")
-            print("Usage: python 04_map_cal_points.py <sensor_id> <csv_path>")
+            print(f"\n\u2717 No CSV files found in {INPUT_FOLDER}")
+            print("Usage: python 04_map_cal_points.py [sensor_id|all] [csv_path]")
             return 1
-    
+
     print(f"\nLoading calibration data from: {csv_path}")
     luminance_values, point_labels = load_calibration_csv(csv_path)
-    
+
     if luminance_values is None or point_labels is None:
         return 1
-        
-    print(f"Calibration points:")
+
+    print("Calibration points:")
     for label, luminance in zip(point_labels, luminance_values):
-        print(f"  - {label}: {luminance} cd/m²")
-    
+        print(f"  - {label}: {luminance} cd/m\u00b2")
+
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-    
-    print("\nLooking for HDR file...")
-    hdr_path, hdr_source = find_hdr_file(sensor_id)
-    
-    if hdr_path is None:
-        print(f"\n✗ Error: HDR file not found for {sensor_id}")
-        print("Please run Phase 3 (03_generate_hdr.py) first to generate the HDR image.")
-        return 1
-        
-    print(f"\nStarting calibration mapper...\n")
-    mapper = CalibrationMapper(hdr_path, luminance_values, point_labels)
-    success = mapper.run()
-    
-    if success:
-        print("\n" + "="*80)
-        print("CALIBRATION MAPPING COMPLETE!")
-        print("="*80)
-        print(f"Output: {os.path.join(OUTPUT_FOLDER, f'{sensor_id}_calibration_points.json')}")
-        return 0
+
+    # Detect available sensors
+    all_sensors = find_all_sensor_ids(workspace)
+
+    # Determine mode
+    if explicit_arg == "all":
+        if not all_sensors:
+            print("\nNo sensors with HDR files found.")
+            return 1
+        return _run_batch_mode(workspace, all_sensors, luminance_values, point_labels)
+
+    elif explicit_arg is None:
+        if len(all_sensors) > 1:
+            return _run_batch_mode(workspace, all_sensors, luminance_values, point_labels)
+        elif len(all_sensors) == 1:
+            sensor_id = all_sensors[0]
+        else:
+            sensor_id = "sensor11"  # legacy default
+
+        # Single sensor: load previous sensor overlay if in sorted list
+        previous_overlay = None
+        if sensor_id in all_sensors:
+            idx = all_sensors.index(sensor_id)
+            if idx > 0:
+                prev_json = os.path.join(OUTPUT_FOLDER,
+                                         f"{all_sensors[idx - 1]}_calibration_points.json")
+                if os.path.exists(prev_json):
+                    try:
+                        with open(prev_json) as f:
+                            previous_overlay = json.load(f).get('points', [])
+                    except Exception:
+                        pass
+
+        success = _run_single_sensor_mapping(sensor_id, luminance_values, point_labels,
+                                             previous_overlay=previous_overlay)
+        if success:
+            print("\n" + "=" * 80)
+            print("CALIBRATION MAPPING COMPLETE!")
+            print("=" * 80)
+            print(f"Output: {os.path.join(OUTPUT_FOLDER, f'{sensor_id}_calibration_points.json')}")
+            return 0
+        else:
+            print("\nCalibration mapping cancelled or failed.")
+            return 1
+
     else:
-        print("\nCalibration mapping cancelled or failed.")
-        return 1
+        # Explicit single sensor ID
+        sensor_id = explicit_arg
+        previous_overlay = None
+        if sensor_id in all_sensors:
+            idx = all_sensors.index(sensor_id)
+            if idx > 0:
+                prev_json = os.path.join(OUTPUT_FOLDER,
+                                         f"{all_sensors[idx - 1]}_calibration_points.json")
+                if os.path.exists(prev_json):
+                    try:
+                        with open(prev_json) as f:
+                            previous_overlay = json.load(f).get('points', [])
+                    except Exception:
+                        pass
+
+        success = _run_single_sensor_mapping(sensor_id, luminance_values, point_labels,
+                                             previous_overlay=previous_overlay)
+        if success:
+            print("\n" + "=" * 80)
+            print("CALIBRATION MAPPING COMPLETE!")
+            print("=" * 80)
+            print(f"Output: {os.path.join(OUTPUT_FOLDER, f'{sensor_id}_calibration_points.json')}")
+            return 0
+        else:
+            print("\nCalibration mapping cancelled or failed.")
+            return 1
 
 
 if __name__ == "__main__":

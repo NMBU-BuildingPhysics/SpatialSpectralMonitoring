@@ -2,7 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
 title: "Spatial-Spectral Sensing System"
-date-released: "2026-02-26"
+version: "2.0.0"
+date-released: "2026-10-23"
 authors:
   - family-names: "Kristiansen"
     given-names: "Tobias"
@@ -54,3 +55,25 @@ preferred-citation:
     name: "Elsevier"
   doi: "10.1016/j.buildenv.2026.114364"
   url: "https://doi.org/10.1016/j.buildenv.2026.114364"
+references:
+  - type: dataset
+    title: "The variability of spatial-spectral daylight: Data collection and case study"
+    authors:
+      - family-names: "Kristiansen"
+        given-names: "Tobias"
+        orcid: "https://orcid.org/0009-0009-2790-7159"
+      - family-names: "Thiis"
+        given-names: "Thomas"
+        orcid: "https://orcid.org/0000-0002-0552-356X"
+      - family-names: "Burud"
+        given-names: "Ingunn"
+        orcid: "https://orcid.org/0000-0003-0637-4073"
+      - family-names: "Petersen"
+        given-names: "Arnkell Jonas"
+        orcid: "https://orcid.org/0009-0004-4305-0179"
+    publisher:
+      name: "Zenodo"
+    year: 2026
+    doi: "10.5281/zenodo.23349221"
+    url: "https://doi.org/10.5281/zenodo.23349221"
+    notes: "Use case: multi-node deployment recorded with firmware v2.0.0."

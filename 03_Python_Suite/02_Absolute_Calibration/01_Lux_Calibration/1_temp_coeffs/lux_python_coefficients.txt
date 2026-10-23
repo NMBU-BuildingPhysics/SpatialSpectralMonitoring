@@ -1,0 +1,1 @@
+LUX_TEMP_COEFFS = {'a': 2.594556194e-06, 'b': 0.002965622208, 'c': 0.9260917036} # Temperature correction coefficients from 2_temp_coeffs

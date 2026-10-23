@@ -5,14 +5,21 @@
 # License: GNU General Public License v3.0
 #
 # Description:
-# Camera validation pipeline: Process JPEG brackets through HDR generation, vignetting correction, and calibration
-# Cross-validates camera-derived illuminance against reference CSV measurements from spectral sensor
+# Camera validation pipeline: Validates camera-derived illuminance against spectral
+# sensor reference measurements. Accepts device-generated HDR files paired with
+# same-timestamp spectral sensor CSV files.
 # ==============================================================================
 param(
-    [string]$SensorId = "sensor11"
+    # Folder containing HDR + CSV pairs (default: images/ in characterization pipeline)
+    [string]$ImagesDir = "",
+    # Filter to a single sensor, e.g. "sensor01". Leave empty to process all.
+    [string]$SensorFilter = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $scriptDir
 
 Write-Host ""
 Write-Host ("=" * 70) -ForegroundColor Cyan
@@ -20,301 +27,236 @@ Write-Host "Camera Validation Pipeline" -ForegroundColor Cyan
 Write-Host ("=" * 70) -ForegroundColor Cyan
 Write-Host ""
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $scriptDir
+# --------------------------------------------------------------------------
+# Resolve input folder
+# --------------------------------------------------------------------------
+if ($ImagesDir -eq "") {
+    $charBase = Resolve-Path "$scriptDir\..\..\01_Characterization\04_Camera_Characterization"
+    $ImagesDir = "$charBase\images"
+}
 
-Write-Host "[Step 1/5] Loading calibration data..." -ForegroundColor Yellow
-Write-Host ""
-
-$calibrationFile = "02_calibration_input\${SensorId}_calibration_report.json"
-if (-not (Test-Path $calibrationFile)) {
-    Write-Host "[ERROR] Calibration file not found: $calibrationFile" -ForegroundColor Red
-    Write-Host "Please ensure calibration files are in the 02_calibration_input/ folder" -ForegroundColor Red
+if (-not (Test-Path $ImagesDir)) {
+    Write-Host "[ERROR] Images folder not found: $ImagesDir" -ForegroundColor Red
+    Write-Host "Pass -ImagesDir <path> to specify the folder containing HDR + CSV pairs." -ForegroundColor Red
     exit 1
 }
 
-$calibData = Get-Content $calibrationFile | ConvertFrom-Json
-$scaleFactor = $calibData.statistics.median
+$charBase     = Resolve-Path "$scriptDir\..\..\01_Characterization\04_Camera_Characterization"
+$vinFolder    = "$charBase\05_correct_vignetting_output"
+$calibInputDir = "$scriptDir\02_calibration_input"
 
-Write-Host "Calibration scale factor: $scaleFactor" -ForegroundColor Green
+Write-Host "[Step 1/4] Scanning '$ImagesDir' for HDR + CSV pairs..." -ForegroundColor Yellow
 Write-Host ""
 
-Write-Host "[Step 2/5] Scanning data folder for validation scenes..." -ForegroundColor Yellow
-Write-Host ""
+# --------------------------------------------------------------------------
+# Build list of valid (HDR, CSV, sensorId) triplets
+# --------------------------------------------------------------------------
+$validPairs = @()
+$hdrFiles = Get-ChildItem "$ImagesDir\*.hdr" | Sort-Object Name
 
-$dataDir = "data"
-if (-not (Test-Path $dataDir)) {
-    Write-Host "[ERROR] Data folder not found: $dataDir" -ForegroundColor Red
-    exit 1
-}
-
-$allImages = Get-ChildItem "$dataDir\*.jpeg" | Sort-Object Name
-
-$scenes = @{}
-foreach ($img in $allImages) {
-    if ($img.Name -match '(\d{8}_\d{6})_') {
-        $timestamp = $matches[1]
-        if (-not $scenes.ContainsKey($timestamp)) {
-            $scenes[$timestamp] = @{
-                Images = @()
-                CSV = $null
+foreach ($hdr in $hdrFiles) {
+    if ($hdr.Name -match '^(\d{8}_\d{6})_(sensor\d+)\.hdr$') {
+        $ts       = $matches[1]
+        $sensorId = $matches[2]
+        if ($SensorFilter -ne "" -and $sensorId -ne $SensorFilter) { continue }
+        $csvFile = Get-ChildItem "$ImagesDir\${ts}_${sensorId}.csv" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($csvFile) {
+            $validPairs += [PSCustomObject]@{
+                Timestamp = $ts
+                SensorId  = $sensorId
+                HdrFile   = $hdr
+                CsvFile   = $csvFile
             }
         }
-        $scenes[$timestamp].Images += $img
     }
 }
 
-foreach ($timestamp in $scenes.Keys) {
-    $csvFile = Get-ChildItem "$dataDir\${timestamp}_*.csv" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($csvFile) {
-        $scenes[$timestamp].CSV = $csvFile
-    }
+if ($validPairs.Count -eq 0) {
+    Write-Host "[ERROR] No matching HDR + CSV pairs found in: $ImagesDir" -ForegroundColor Red
+    exit 1
 }
 
-$validScenes = $scenes.GetEnumerator() | Where-Object { $_.Value.Images.Count -gt 0 -and $_.Value.CSV -ne $null } | Sort-Object Name
-
-Write-Host "Found $($validScenes.Count) validation scenes:" -ForegroundColor Green
-foreach ($scene in $validScenes) {
-    $ts = $scene.Key
-    $imgCount = $scene.Value.Images.Count
-    Write-Host "  - $ts : $imgCount images (with CSV)" -ForegroundColor White
+Write-Host "Found $($validPairs.Count) HDR + CSV pairs:" -ForegroundColor Green
+foreach ($p in $validPairs) {
+    Write-Host "  - $($p.Timestamp) / $($p.SensorId)" -ForegroundColor White
 }
 Write-Host ""
 
-Write-Host "[Step 3/5] Processing validation scenes..." -ForegroundColor Yellow
+# --------------------------------------------------------------------------
+# Process each pair
+# --------------------------------------------------------------------------
+Write-Host "[Step 2/4] Processing scenes..." -ForegroundColor Yellow
 Write-Host ""
 
-$results = @()
+$results  = @()
 $sceneNum = 1
 
-foreach ($scene in $validScenes) {
-    $timestamp = $scene.Key
-    $images = $scene.Value.Images
-    $csvFile = $scene.Value.CSV
-    
-    Write-Host "Processing Scene $sceneNum/$($validScenes.Count): $timestamp" -ForegroundColor Cyan
-    
+foreach ($pair in $validPairs) {
+    $ts       = $pair.Timestamp
+    $sensorId = $pair.SensorId
+    $csvFile  = $pair.CsvFile
+
+    Write-Host "Scene $sceneNum/$($validPairs.Count): $ts / $sensorId" -ForegroundColor Cyan
+
     try {
-        $sceneOutputDir = "03_validation_output\$timestamp"
+        $sceneOutputDir = "03_validation_output\${ts}_${sensorId}"
         New-Item -ItemType Directory -Path $sceneOutputDir -Force | Out-Null
-        
-        $sortedImages = $images | Sort-Object Name
-        $exposureTimes = @()
-        $imagePaths = @()
-        
-        foreach ($img in $sortedImages) {
-            if ($img.Name -match '_exp(\d+)\.jpeg$') {
-                $expValue = [int]$matches[1]
-                $exposureTimes += $expValue
-                $imagePaths += $img.FullName
-            }
-        }
-        
-        if ($exposureTimes.Count -eq 0) {
-            throw "No valid images with exposure values found"
-        }
-        
-        Write-Host "  [1/6] Found $($exposureTimes.Count) exposure brackets" -ForegroundColor White
-        
-        Write-Host "  [2/6] Generating HDR..." -ForegroundColor White
-        $rawHdrPath = "$sceneOutputDir\${timestamp}_${SensorId}_raw.hdr"
-        $exposureStr = $exposureTimes -join ','
-        $imagePathsStr = $imagePaths -join ' '
-        
-        python tools\generate_hdr_standalone.py $imagePaths --exposures $exposureStr --output $rawHdrPath 2>&1 | Out-Null
-        
-        if (-not (Test-Path $rawHdrPath)) {
-            throw "HDR generation failed"
-        }
-        
-        Write-Host "  [3/6] Applying vignetting correction..." -ForegroundColor White
-        $vignettingMap = "02_calibration_input\${SensorId}_vignetting_correction_map.npy"
-        $vignettingCorrectedPath = "$sceneOutputDir\${timestamp}_${SensorId}_vignetting_corrected.hdr"
-        
-        if (Test-Path $vignettingMap) {
-            python tools\apply_vignetting_standalone.py --hdr $rawHdrPath --correction $vignettingMap --output $vignettingCorrectedPath 2>&1 | Out-Null
-            
-            if (-not (Test-Path $vignettingCorrectedPath)) {
-                throw "Vignetting correction failed"
-            }
-            $hdrForCalibration = $vignettingCorrectedPath
+
+        # Load calibration scale factor
+        $calibFile = "$calibInputDir\${sensorId}_calibration_report.json"
+        if (-not (Test-Path $calibFile)) { throw "Calibration report not found: $calibFile" }
+        $calibData   = Get-Content $calibFile | ConvertFrom-Json
+        $scaleFactor = $calibData.median_scale_factor
+        Write-Host "  [1/4] Scale factor: $($scaleFactor.ToString('N4'))" -ForegroundColor White
+
+        # Resolve HDR source: prefer _Vin.hdr, fall back to raw
+        $vinPath = "$vinFolder\${sensorId}_Vin.hdr"
+        if (Test-Path $vinPath) {
+            $sourceHdr = $vinPath
+            Write-Host "  [2/4] Using vignetting-corrected HDR" -ForegroundColor White
         } else {
-            Write-Host "    (No vignetting map found, skipping)" -ForegroundColor DarkGray
-            $hdrForCalibration = $rawHdrPath
+            $sourceHdr = $pair.HdrFile.FullName
+            Write-Host "  [2/4] Using raw HDR (no _Vin.hdr found)" -ForegroundColor DarkYellow
         }
-        
-        Write-Host "  [4/6] Applying calibration..." -ForegroundColor White
-        $calibratedHdrPath = "$sceneOutputDir\${timestamp}_${SensorId}_calibrated.hdr"
-        
-        python tools\apply_calibration_standalone.py --hdr $hdrForCalibration --scale $scaleFactor --output $calibratedHdrPath 2>&1 | Out-Null
-        
-        if (-not (Test-Path $calibratedHdrPath)) {
-            throw "Calibration application failed"
-        }
-        
-        Write-Host "  [5/6] Calculating illuminance..." -ForegroundColor White
-        
-        $luxReportPath = "$sceneOutputDir\${timestamp}_${SensorId}_lux_report.json"
-        python tools\calculate_lux.py --hdr $calibratedHdrPath --output $luxReportPath --sensor-id $SensorId 2>&1 | Out-Null
-        
-        if (-not (Test-Path $luxReportPath)) {
-            throw "Lux calculation failed"
-        }
-        
-        $luxData = Get-Content $luxReportPath | ConvertFrom-Json
+
+        # Apply calibration
+        Write-Host "  [3/4] Applying calibration..." -ForegroundColor White
+        $calibratedHdrPath = "$sceneOutputDir\${ts}_${sensorId}_Cal.hdr"
+        python tools\apply_calibration_standalone.py `
+            --hdr $sourceHdr --scale $scaleFactor --output $calibratedHdrPath 2>&1 | Out-Null
+        if (-not (Test-Path $calibratedHdrPath)) { throw "Calibration step produced no output HDR" }
+
+        # Calculate lux
+        Write-Host "  [4/4] Calculating illuminance..." -ForegroundColor White
+        $luxReportPath = "$sceneOutputDir\${ts}_${sensorId}_lux_report.json"
+        python tools\calculate_lux.py `
+            --hdr $calibratedHdrPath --output $luxReportPath --sensor-id $sensorId 2>&1 | Out-Null
+        if (-not (Test-Path $luxReportPath)) { throw "Lux calculation produced no report" }
+
+        $luxData       = Get-Content $luxReportPath | ConvertFrom-Json
         $calculatedLux = $luxData.lux_calculation.horizontal_illuminance_lux
-        
-        Write-Host "  [6/6] Comparing with measured value..." -ForegroundColor White
-        $csvLine = Get-Content $csvFile.FullName -First 1
-        $measuredLux = [float](($csvLine -split ',')[8])
-        
-        $error = (($calculatedLux - $measuredLux) / $measuredLux) * 100
+
+        # Reference lux from CSV column 16 (cal_lux)
+        # Header: date,time,device,rssi,uptime_min,S_gain,S_time,U_gain,U_time,
+        #         I_gain,I_time,num_accum,temperature,humidity,tsl_ch0,tsl_ch1,
+        #         raw_lux,cal_lux,...
+        $csvFields   = (Get-Content $csvFile.FullName -First 1) -split ','
+        $measuredLux = [float]$csvFields[16]
+
+        $error    = (($calculatedLux - $measuredLux) / $measuredLux) * 100
         $absError = [Math]::Abs($error)
-        
-        Write-Host "    Calculated: $($calculatedLux.ToString('N2')) lux" -ForegroundColor White
-        Write-Host "    Measured:   $($measuredLux.ToString('N2')) lux" -ForegroundColor White
-        
-        if ($absError -lt 10) {
-            Write-Host "    Error:      $($error.ToString('N1'))%" -ForegroundColor Green
-        } elseif ($absError -lt 20) {
-            Write-Host "    Error:      $($error.ToString('N1'))%" -ForegroundColor Yellow
-        } else {
-            Write-Host "    Error:      $($error.ToString('N1'))%" -ForegroundColor Red
-        }
-        
-        $results += @{
-            Timestamp = $timestamp
+
+        Write-Host "    Camera lux:   $($calculatedLux.ToString('N1'))" -ForegroundColor White
+        Write-Host "    Sensor lux:   $($measuredLux.ToString('N1'))" -ForegroundColor White
+        $errColor = if ($absError -lt 10) { 'Green' } elseif ($absError -lt 20) { 'Yellow' } else { 'Red' }
+        Write-Host "    Error:        $($error.ToString('N1'))%" -ForegroundColor $errColor
+
+        $results += [PSCustomObject]@{
+            Timestamp     = $ts
+            SensorId      = $sensorId
             CalculatedLux = $calculatedLux
-            MeasuredLux = $measuredLux
-            ErrorPercent = $error
-            Success = $true
-            OutputDir = $sceneOutputDir
+            MeasuredLux   = $measuredLux
+            ErrorPercent  = $error
+            Success       = $true
+            OutputDir     = $sceneOutputDir
         }
-        
-        Write-Host "[OK] Scene $timestamp processed" -ForegroundColor Green
-        
+        Write-Host "[OK] $sensorId done" -ForegroundColor Green
+
     } catch {
-        Write-Host "[ERROR] Failed: $_" -ForegroundColor Red
-        $results += @{
-            Timestamp = $timestamp
-            Success = $false
+        Write-Host "[ERROR] $sensorId failed: $_" -ForegroundColor Red
+        $results += [PSCustomObject]@{
+            Timestamp    = $ts
+            SensorId     = $sensorId
+            Success      = $false
             ErrorMessage = $_.ToString()
         }
     }
-    
+
     Write-Host ""
     $sceneNum++
 }
 
-Write-Host "[Step 4/5] Calculating validation statistics..." -ForegroundColor Yellow
+# --------------------------------------------------------------------------
+Write-Host "[Step 3/4] Statistics..." -ForegroundColor Yellow
 Write-Host ""
 
-$successfulResults = $results | Where-Object { $_.Success -eq $true }
+$ok     = $results | Where-Object { $_.Success }
+$failed = $results | Where-Object { -not $_.Success }
 
-if ($successfulResults.Count -eq 0) {
-    Write-Host "[ERROR] No scenes processed successfully" -ForegroundColor Red
+if ($ok.Count -eq 0) {
+    Write-Host "[ERROR] No scenes processed successfully." -ForegroundColor Red
     exit 1
 }
 
-$errors = $successfulResults | ForEach-Object { $_.ErrorPercent }
+$errors    = $ok | ForEach-Object { $_.ErrorPercent }
 $absErrors = $errors | ForEach-Object { [Math]::Abs($_) }
 
 $meanError = ($errors | Measure-Object -Average).Average
-$stdError = if ($errors.Count -gt 1) {
+$stdError  = if ($errors.Count -gt 1) {
     $variance = ($errors | ForEach-Object { ($_ - $meanError) * ($_ - $meanError) } | Measure-Object -Sum).Sum / ($errors.Count - 1)
     [Math]::Sqrt($variance)
-} else {
-    0
-}
+} else { 0 }
 $minError = ($errors | Measure-Object -Minimum).Minimum
 $maxError = ($errors | Measure-Object -Maximum).Maximum
-
 $within10 = ($absErrors | Where-Object { $_ -lt 10 }).Count
 $within20 = ($absErrors | Where-Object { $_ -lt 20 }).Count
 
-Write-Host "Validation Statistics:" -ForegroundColor Cyan
-Write-Host "  Total scenes: $($results.Count)" -ForegroundColor White
-Write-Host "  Successful: $($successfulResults.Count)" -ForegroundColor Green
-Write-Host "  Failed: $($results.Count - $successfulResults.Count)" -ForegroundColor Red
-Write-Host ""
-Write-Host "Error Statistics:" -ForegroundColor Cyan
-Write-Host "  Mean error:   $($meanError.ToString('N2'))%" -ForegroundColor White
-Write-Host "  Std dev:      $($stdError.ToString('N2'))" -ForegroundColor White
-Write-Host "  Min error:    $($minError.ToString('N2'))%" -ForegroundColor White
-Write-Host "  Max error:    $($maxError.ToString('N2'))%" -ForegroundColor White
-Write-Host "  Within ±10%:  $within10 / $($successfulResults.Count)" -ForegroundColor White
-Write-Host "  Within ±20%:  $within20 / $($successfulResults.Count)" -ForegroundColor White
+Write-Host "Error Statistics (camera vs spectral sensor cal_lux):" -ForegroundColor Cyan
+Write-Host "  Scenes total:  $($results.Count) ($($ok.Count) OK, $($failed.Count) failed)" -ForegroundColor White
+Write-Host "  Mean error:    $($meanError.ToString('N2'))%" -ForegroundColor White
+Write-Host "  Std dev:       $($stdError.ToString('N2'))%" -ForegroundColor White
+Write-Host "  Min / Max:     $($minError.ToString('N2'))% / $($maxError.ToString('N2'))%" -ForegroundColor White
+Write-Host "  Within �10%:   $within10 / $($ok.Count)" -ForegroundColor White
+Write-Host "  Within �20%:   $within20 / $($ok.Count)" -ForegroundColor White
 Write-Host ""
 
-Write-Host "[Step 5/5] Generating validation report..." -ForegroundColor Yellow
+Write-Host "Per-sensor results:" -ForegroundColor Cyan
+Write-Host ("  {0,-12} {1,10} {2,10} {3,8}" -f "Sensor", "Camera(lx)", "Sensor(lx)", "Error%") -ForegroundColor White
+Write-Host ("  " + "-" * 46) -ForegroundColor DarkGray
+foreach ($r in ($ok | Sort-Object SensorId)) {
+    $errColor = if ([Math]::Abs($r.ErrorPercent) -lt 10) { 'Green' } `
+                elseif ([Math]::Abs($r.ErrorPercent) -lt 20) { 'Yellow' } else { 'Red' }
+    Write-Host ("  {0,-12} {1,10:N1} {2,10:N1} {3,8:N1}" -f `
+        $r.SensorId, $r.CalculatedLux, $r.MeasuredLux, $r.ErrorPercent) -ForegroundColor $errColor
+}
 Write-Host ""
+
+# --------------------------------------------------------------------------
+Write-Host "[Step 4/4] Saving validation report..." -ForegroundColor Yellow
 
 $report = @{
-    sensor_id = $SensorId
-    calibration_scale_factor = $scaleFactor
-    total_scenes = $results.Count
-    successful_scenes = $successfulResults.Count
-    failed_scenes = $results.Count - $successfulResults.Count
-    error_statistics = @{
-        mean_percent = $meanError
+    processed_at      = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+    images_dir        = $ImagesDir
+    total_scenes      = $results.Count
+    successful_scenes = $ok.Count
+    failed_scenes     = $failed.Count
+    error_statistics  = @{
+        mean_percent    = $meanError
         std_dev_percent = $stdError
-        min_percent = $minError
-        max_percent = $maxError
-        within_10_percent = $within10
-        within_20_percent = $within20
+        min_percent     = $minError
+        max_percent     = $maxError
+        within_10_pct   = $within10
+        within_20_pct   = $within20
     }
-    scenes = $results | ForEach-Object {
+    scenes = @($results | ForEach-Object {
         if ($_.Success) {
-            @{
-                timestamp = $_.Timestamp
-                calculated_lux = $_.CalculatedLux
-                measured_lux = $_.MeasuredLux
-                error_percent = $_.ErrorPercent
-                output_directory = $_.OutputDir
-                success = $_.Success
-            }
+            @{ timestamp=$_.Timestamp; sensor_id=$_.SensorId;
+               camera_lux=$_.CalculatedLux; sensor_lux=$_.MeasuredLux;
+               error_percent=$_.ErrorPercent; success=$true }
         } else {
-            @{
-                timestamp = $_.Timestamp
-                success = $_.Success
-                error_message = $_.ErrorMessage
-            }
+            @{ timestamp=$_.Timestamp; sensor_id=$_.SensorId;
+               success=$false; error=$_.ErrorMessage }
         }
-    }
+    })
 }
 
+New-Item -ItemType Directory -Path "03_validation_output" -Force | Out-Null
 $reportPath = "03_validation_output\validation_report.json"
 $report | ConvertTo-Json -Depth 10 | Set-Content $reportPath
 
-Write-Host "Validation report saved: $reportPath" -ForegroundColor Green
-Write-Host ""
-
-Write-Host ("=" * 70) -ForegroundColor Cyan
-Write-Host "VALIDATION SUMMARY" -ForegroundColor Cyan
-Write-Host ("=" * 70) -ForegroundColor Cyan
-Write-Host ""
-
-Write-Host "Scene              Calculated   Measured    Error" -ForegroundColor White
-Write-Host ("-" * 70) -ForegroundColor DarkGray
-
-foreach ($result in $results) {
-    if ($result.Success) {
-        $line = "{0,-18} {1,10:N2}  {2,10:N2}  {3,8:N1}%" -f $result.Timestamp, $result.CalculatedLux, $result.MeasuredLux, $result.ErrorPercent
-        $absError = [Math]::Abs($result.ErrorPercent)
-        if ($absError -lt 10) {
-            Write-Host $line -ForegroundColor Green
-        } elseif ($absError -lt 20) {
-            Write-Host $line -ForegroundColor Yellow
-        } else {
-            Write-Host $line -ForegroundColor Red
-        }
-    } else {
-        Write-Host "$($result.Timestamp)      FAILED" -ForegroundColor Red
-    }
-}
-
+Write-Host "Report saved: $reportPath" -ForegroundColor Green
 Write-Host ""
 Write-Host ("=" * 70) -ForegroundColor Cyan
-Write-Host "All outputs saved in: 03_validation_output\" -ForegroundColor Green
+Write-Host "DONE" -ForegroundColor Cyan
 Write-Host ("=" * 70) -ForegroundColor Cyan
 Write-Host ""

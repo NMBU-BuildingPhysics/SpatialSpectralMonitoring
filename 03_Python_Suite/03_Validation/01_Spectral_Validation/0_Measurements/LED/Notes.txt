@@ -1,0 +1,3 @@
+- High Intensity source
+- Difficult to enshure correct alligment
+- Should re-calibtate with different LED source.

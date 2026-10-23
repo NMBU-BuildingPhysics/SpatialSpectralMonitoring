@@ -16,8 +16,11 @@ pip install numpy opencv-python matplotlib
 ```
 
 ### Input Data
+If multi exposure JPEG is used: 
+- Place raw multi-exposure JPEG images in `01_define_roi_input/` before starting. Run scripts in order.
+If HDR is used:
+- Place HDRs in `03_generate_hdr_output/` and start from `04_map_cal_points.py`.
 
-Place raw multi-exposure JPEG images in `01_define_roi_input/` before starting. Run scripts in order.
 
 ## Scripts
 

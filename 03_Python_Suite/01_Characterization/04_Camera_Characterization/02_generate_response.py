@@ -15,6 +15,25 @@ from pathlib import Path
 from typing import List, Tuple
 
 
+def find_all_sensor_ids(images_dir: Path) -> List[str]:
+    """
+    Scan images directory for all unique sensor IDs found in image filenames.
+
+    Args:
+        images_dir: Path to images directory
+
+    Returns:
+        Sorted list of unique sensor IDs (e.g. ['sensor01', 'sensor11'])
+    """
+    sensor_ids = set()
+    for ext in ('*.jpeg', '*.jpg'):
+        for img in images_dir.glob(ext):
+            match = re.search(r'(sensor\d{2})', img.name)
+            if match:
+                sensor_ids.add(match.group(1))
+    return sorted(sensor_ids)
+
+
 def find_sensor_images(images_dir: Path, sensor_id: str) -> List[Path]:
     """
     Find all images for a specific sensor in the images directory.
@@ -124,14 +143,20 @@ def generate_response_file(images: List[Path], output_path: Path, sensor_id: str
     print(f"  Exposure range: {image_exposures[0][0]:.1f} to {image_exposures[-1][0]:.1f}")
 
 
-def main():
-    """Main entry point."""
-    sensor_id = sys.argv[1] if len(sys.argv) > 1 else "sensor11"
-    workspace = Path(__file__).parent
-    images_dir = workspace / "images"
-    output_dir = workspace / "02_generate_response_output"
+def process_single_sensor(images_dir: Path, output_dir: Path, sensor_id: str) -> bool:
+    """
+    Process a single sensor: find images and generate response file.
+
+    Args:
+        images_dir: Path to images directory
+        output_dir: Path to output directory
+        sensor_id: Sensor identifier (e.g., 'sensor11')
+
+    Returns:
+        True if successful, False otherwise.
+    """
     output_path = output_dir / f"{sensor_id}.rsp"
-    
+
     print("=" * 70)
     print("PHASE 2: AUTO-GENERATE RESPONSE FILE")
     print("=" * 70)
@@ -139,15 +164,10 @@ def main():
     print(f"Sensor: {sensor_id}")
     print(f"Searching: {images_dir}")
     print()
-    
-    if not images_dir.exists():
-        print(f"ERROR: Images directory not found: {images_dir}")
-        print("Please create images/ folder and add bracketed exposure images.")
-        sys.exit(1)
-    
+
     print("Searching for images...")
     images = find_sensor_images(images_dir, sensor_id)
-    
+
     if len(images) == 0:
         print(f"ERROR: No images found for {sensor_id}")
         print(f"Expected pattern: *_{sensor_id}_exp*.jpeg")
@@ -157,19 +177,19 @@ def main():
         print("           20250208_114436_sensor11_exp2.jpeg")
         print("           20250208_114436_sensor11_exp8.jpeg")
         print("           ...")
-        sys.exit(1)
-    
+        return False
+
     print(f"Found {len(images)} images")
     print()
-    
+
     sessions = group_by_timestamp(images)
-    
+
     if len(sessions) > 1:
         print(f"WARNING: Found {len(sessions)} different capture sessions:")
         for timestamp, session_images in sorted(sessions.items()):
             print(f"  {timestamp}: {len(session_images)} images")
         print()
-        
+
         selected_timestamp = sorted(sessions.keys())[-1]
         print(f"Using most recent session: {selected_timestamp}")
         images = sessions[selected_timestamp]
@@ -178,7 +198,7 @@ def main():
         timestamp = list(sessions.keys())[0]
         print(f"Capture session: {timestamp}")
         print()
-    
+
     print("Images to include:")
     for img in sorted(images):
         try:
@@ -187,9 +207,9 @@ def main():
         except ValueError:
             print(f"  {img.name} (unknown exposure)")
     print()
-    
+
     generate_response_file(images, output_path, sensor_id)
-    
+
     print()
     print("=" * 70)
     print("PHASE 2 COMPLETE")
@@ -200,6 +220,89 @@ def main():
     print("Next step:")
     print(f"  python 03_generate_hdr.py {sensor_id}")
     print()
+    return True
+
+
+def main():
+    """Main entry point. Supports single-sensor and batch ('all') modes."""
+    workspace = Path(__file__).parent
+    images_dir = workspace / "images"
+    output_dir = workspace / "02_generate_response_output"
+
+    if not images_dir.exists():
+        print(f"ERROR: Images directory not found: {images_dir}")
+        print("Please create images/ folder and add bracketed exposure images.")
+        sys.exit(1)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    all_sensor_ids = find_all_sensor_ids(images_dir)
+    explicit_arg = sys.argv[1] if len(sys.argv) > 1 else None
+
+    # Determine mode and sensor list
+    if explicit_arg == "all":
+        batch_mode = True
+        sensors_to_process = all_sensor_ids if all_sensor_ids else []
+    elif explicit_arg is not None:
+        batch_mode = False
+        sensors_to_process = [explicit_arg]
+    elif len(all_sensor_ids) > 1:
+        batch_mode = True
+        sensors_to_process = all_sensor_ids
+        print(f"Auto-detected {len(all_sensor_ids)} sensors. Running batch mode.")
+        print()
+    elif len(all_sensor_ids) == 1:
+        batch_mode = False
+        sensors_to_process = all_sensor_ids
+    else:
+        # No sensors detected; fall back to default
+        batch_mode = False
+        sensors_to_process = ["sensor11"]
+
+    if not sensors_to_process:
+        print("ERROR: No sensor images found in images/ directory.")
+        sys.exit(1)
+
+    if batch_mode:
+        print("=" * 70)
+        print("PHASE 2: AUTO-GENERATE RESPONSE FILES (BATCH MODE)")
+        print("=" * 70)
+        print(f"Sensors to process ({len(sensors_to_process)}): {', '.join(sensors_to_process)}")
+        print()
+
+        processed = []
+        failed = []
+        n = len(sensors_to_process)
+
+        for i, sensor_id in enumerate(sensors_to_process, 1):
+            print(f"\n{'─' * 70}")
+            print(f"Processing sensor {i} of {n}: {sensor_id}")
+            print(f"{'─' * 70}\n")
+            try:
+                ok = process_single_sensor(images_dir, output_dir, sensor_id)
+                (processed if ok else failed).append(sensor_id)
+            except Exception as e:
+                print(f"[ERROR] {e}")
+                failed.append(sensor_id)
+
+        print()
+        print("=" * 70)
+        print("BATCH COMPLETE")
+        print("=" * 70)
+        print(f"Processed {len(processed)} of {n} sensors.")
+        if processed:
+            print(f"  Success: {', '.join(processed)}")
+        if failed:
+            print(f"  Failed:  {', '.join(failed)}")
+        print()
+        print("Next step:")
+        print("  python 03_generate_hdr.py all")
+        print()
+    else:
+        sensor_id = sensors_to_process[0]
+        ok = process_single_sensor(images_dir, output_dir, sensor_id)
+        if not ok:
+            sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -16,11 +16,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 base_folder = Path(__file__).parent
-INPUT_DATA_FILE = base_folder / "0_Measurements" / "temp" / "lux_temp_sweep_data.csv"
+INPUT_DATA_FILE = base_folder / "0_Measurements" / "temp" / "temperature_sweep_data.csv"
 output_folder = base_folder / "1_temp_coeffs"
 output_folder.mkdir(exist_ok=True)
 
-SENSOR_TO_MODEL = "sensor02"
+SENSOR_TO_MODEL = "sensor11"
 REFERENCE_TEMPERATURE = 25.0
 POLYNOMIAL_DEGREE = 2
 MINIMUM_TEMPERATURE_TO_INCLUDE = 24.0
@@ -73,7 +73,7 @@ except FileNotFoundError:
     print(f"ERROR: Cannot find '{INPUT_DATA_FILE}'.")
     sys.exit()
 
-df_full = df_full[df_full['sensor'] == SENSOR_TO_MODEL].copy()
+df_full = df_full[df_full['device'] == SENSOR_TO_MODEL].copy()
 if df_full.empty:
     print(f"ERROR: No data found for '{SENSOR_TO_MODEL}' in the input file.")
     sys.exit()
@@ -89,11 +89,11 @@ if ref_df.empty:
     print(f"ERROR: No data found near reference temp {REFERENCE_TEMPERATURE}°C for {SENSOR_TO_MODEL}.")
     sys.exit()
 
-ref_illuminance = ref_df['illuminance'].mean()
+ref_illuminance = ref_df['raw_lux'].mean()
 print(f"Calculated reference illuminance for {SENSOR_TO_MODEL}: {ref_illuminance:.2f} lux")
 
-df_full['normalized_illuminance'] = df_full['illuminance'] / ref_illuminance
-df_fit['normalized_illuminance'] = df_fit['illuminance'] / ref_illuminance
+df_full['normalized_illuminance'] = df_full['raw_lux'] / ref_illuminance
+df_fit['normalized_illuminance'] = df_fit['raw_lux'] / ref_illuminance
 
 if ENABLE_SUBSAMPLING:
     print(f"Subsampling data: max {SUBSAMPLE_MAX_PER_BIN} points per {SUBSAMPLE_BIN_WIDTH_C}°C bin.")
